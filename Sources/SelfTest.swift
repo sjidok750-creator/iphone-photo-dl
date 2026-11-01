@@ -70,8 +70,18 @@ func runSelfTest(_ console: Console) -> Bool {
     check((try? parseArguments(["--since", "2024-13-01"])) == nil, "arg bad date")
     check((try? parseArguments(["--limit"])) == nil, "arg missing value")
     check((try? parseArguments([]))?.destination.hasSuffix("/Pictures/iPhone") == true, "arg default dest")
-    check((try? parseArguments([]))?.requestOriginals == true, "arg originals default")
-    check((try? parseArguments(["--no-originals"]))?.requestOriginals == false, "arg no-originals")
+    check((try? parseArguments([]))?.requestOriginals == false, "arg originals default off")
+    check((try? parseArguments(["--request-originals"]))?.requestOriginals == true, "arg request-originals")
+    check((try? parseArguments(["--no-originals"]))?.requestOriginals == false, "arg no-originals (0.9 호환)")
+    check((try? parseArguments(["--cli"]))?.destination == defaultDestination, "arg cli")
+    check((try? parseArguments([]))?.window == 2, "arg window default")
+
+    // 버전 비교 (새 버전 알림)
+    check(isNewerVersion("v0.10.0", than: "0.9.1"), "ver 0.10 > 0.9.1")
+    check(isNewerVersion("v1.0.0", than: "0.10.0"), "ver 1.0 > 0.10")
+    check(!isNewerVersion("v0.10.0", than: "0.10.0"), "ver same")
+    check(!isNewerVersion("v0.9.9", than: "0.10.0"), "ver older")
+    check(isNewerVersion("0.10.1", than: "0.10"), "ver patch")
 
     // 계획: 날짜는 시간대와 상관없게 각 달 15일 정오(UTC)
     func day(_ y: Int, _ mo: Int, hour: Int = 12) -> Date {

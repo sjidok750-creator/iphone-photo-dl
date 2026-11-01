@@ -3,8 +3,12 @@
 
 import Foundation
 
-let appVersion = "0.9.1"
+let appVersion = "0.10.0"
+let appDisplayName = "아이폰 사진 받기"
+let githubRepo = "sjidok750-creator/iphone-photo-dl"
+let installCommand = "curl -fsSL https://raw.githubusercontent.com/\(githubRepo)/main/install.sh | bash"
 let stateDirName = ".iphone-photo-dl"
+let defaultDestination = NSString(string: "~/Pictures/iPhone").expandingTildeInPath
 
 // MARK: - 옵션
 
@@ -19,7 +23,7 @@ enum KindFilter {
 }
 
 struct Options {
-    var destination = NSString(string: "~/Pictures/iPhone").expandingTildeInPath
+    var destination = defaultDestination
     var layout = Layout.date
     var kinds = KindFilter.all
     var since: Date?
@@ -27,9 +31,9 @@ struct Options {
     var listOnly = false
     var dryRun = false
     var openWhenDone = false
-    var requestOriginals = true
+    var requestOriginals = false   // 0.10: 기본은 끔(Big Sur 에서 효과 미확인) — 아이폰 '원본 유지' 설정에 맡긴다
     var timeout: Double = 60
-    var window = 4
+    var window = 2
     var showHelp = false
     var showVersion = false
     var selfTest = false
@@ -43,10 +47,12 @@ let helpText = """
 iphone-photo-dl \(appVersion) — 아이폰 사진·동영상을 Mac 으로 한꺼번에 받습니다.
 
 사용법:
-  iphone-photo-dl [옵션] [저장폴더]
+  iphone-photo-dl                 창(앱)으로 열기
+  iphone-photo-dl --cli           터미널에서 ~/Pictures/iPhone 에 받기
+  iphone-photo-dl [옵션] [저장폴더] 터미널에서 받기
 
-  저장폴더를 생략하면 ~/Pictures/iPhone 에 받습니다.
   이미 받은 파일은 건너뛰므로, 다시 실행하면 새 사진만 받습니다.
+  기록: ~/Library/Logs/iphone-photo-dl.log
 
 옵션:
   --list              받지 않고 개수·용량만 보여 줍니다
@@ -58,7 +64,8 @@ iphone-photo-dl \(appVersion) — 아이폰 사진·동영상을 Mac 으로 한�
   --photos-only       사진만 (Live Photo 의 동영상 부분 제외)
   --videos-only       동영상만
   --limit 20          앞에서부터 이 개수만 (시험용)
-  --no-originals      원본 요청을 하지 않고 아이폰 설정대로 받기
+  --request-originals 아이폰에 원본(변환 안 한 파일)을 달라고 요청 (시험용, 기본 끔)
+  --window 2          한 번에 줄 세우는 파일 수 (1~8)
   --timeout 60        아이폰을 기다리는 시간(초)
   --open              끝나면 Finder 로 저장 폴더 열기
   --version           버전
@@ -94,7 +101,9 @@ func parseArguments(_ args: [String]) throws -> Options {
         case "--list": o.listOnly = true
         case "--dry-run": o.dryRun = true
         case "--open": o.openWhenDone = true
-        case "--no-originals": o.requestOriginals = false
+        case "--cli": break   // 옵션 없이 터미널 모드로 받기
+        case "--no-originals": o.requestOriginals = false   // 0.9 호환
+        case "--request-originals": o.requestOriginals = true
         case "--photos-only": o.kinds = .photos
         case "--videos-only": o.kinds = .videos
         case "--layout":
@@ -119,7 +128,7 @@ func parseArguments(_ args: [String]) throws -> Options {
             o.timeout = n
         case "--window":
             let v = try value(a)
-            guard let n = Int(v), (1...32).contains(n) else { throw ArgError(description: "--window 는 1~32 입니다 (입력: \(v))") }
+            guard let n = Int(v), (1...8).contains(n) else { throw ArgError(description: "--window 는 1~8 입니다 (입력: \(v))") }
             o.window = n
         default:
             if a.hasPrefix("-") && a.count > 1 {
@@ -336,6 +345,32 @@ final class Manifest {
         handle?.closeFile()
         handle = nil
     }
+}
+
+// MARK: - 버전
+
+/// "v0.10.2" 가 "0.9.1" 보다 새것인가 (숫자 마디별 비교)
+func isNewerVersion(_ remote: String, than local: String) -> Bool {
+    func parts(_ s: String) -> [Int] {
+        let t = s.hasPrefix("v") ? String(s.dropFirst()) : s
+        return t.split(separator: ".").map { Int($0.prefix(while: { $0.isNumber })) ?? 0 }
+    }
+    let a = parts(remote), b = parts(local)
+    for i in 0..<max(a.count, b.count) {
+        let x = i < a.count ? a[i] : 0
+        let y = i < b.count ? b[i] : 0
+        if x != y { return x > y }
+    }
+    return false
+}
+
+func systemDescription() -> String {
+    #if arch(arm64)
+    let arch = "arm64"
+    #else
+    let arch = "x86_64"
+    #endif
+    return "macOS \(ProcessInfo.processInfo.operatingSystemVersionString) · \(arch)"
 }
 
 // MARK: - 표시

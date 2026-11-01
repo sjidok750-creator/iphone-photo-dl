@@ -14,14 +14,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install with the README one-liner
+        env:
+          IPHONE_PHOTO_DL_NO_LAUNCH: "1"
         run: |
           uname -m
           sw_vers -productVersion
           curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
-      - name: Run installed binary
+      - name: Run installed app binary
         run: |
           B="$HOME/.iphone-photo-dl/bin/iphone-photo-dl"
-          file "$B"
+          file -L "$B"
           "$B" --version
           "$B" --self-test
           set +e

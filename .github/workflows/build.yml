@@ -14,22 +14,23 @@ jobs:
   build:
     # macOS 10.15 를 공식 지원하는 마지막 Xcode 가 16 이다(Xcode 26 은 11 이상, 27 은 12 이상).
     runs-on: macos-15
+    env:
+      APP: build/아이폰 사진 받기.app
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode 16
         run: |
-          ls -d /Applications/Xcode*.app
           X=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -n 1)
-          if [ -z "$X" ]; then echo "Xcode 16 이 없음"; exit 1; fi
+          if [ -z "$X" ]; then echo "Xcode 16 이 없음"; ls -d /Applications/Xcode*.app; exit 1; fi
           sudo xcode-select -s "$X/Contents/Developer"
 
       - name: Toolchain
         run: |
           sw_vers
-          xcodebuild -version
-          swiftc --version
           V=$(xcodebuild -version)
+          echo "$V"
+          swiftc --version
           case "$V" in "Xcode 16"*) ;; *) echo "Xcode 16 이 아님"; exit 1 ;; esac
 
       - name: Shell syntax
@@ -37,12 +38,12 @@ jobs:
           bash -n build.sh
           bash -n install.sh
 
-      - name: Build (universal, macOS 10.15+)
+      - name: Build app (universal, macOS 10.15+)
         run: bash build.sh universal
 
       - name: Check binary
         run: |
-          B=build/iphone-photo-dl
+          B="$APP/Contents/MacOS/iphone-photo-dl"
           lipo -info "$B"
           lipo -info "$B" | grep -q x86_64
           lipo -info "$B" | grep -q arm64
@@ -54,57 +55,74 @@ jobs:
           if grep -E "_StringProcessing|_Concurrency|libswift_RegexParser" /tmp/libs.txt; then
             echo "macOS 10.15 에 없는 라이브러리가 연결됨"; exit 1
           fi
+          plutil -lint "$APP/Contents/Info.plist"
+          ls -la "$APP/Contents/Resources"
+          codesign -dv "$APP" 2>&1 | head -n 5
 
       - name: Self test (arm64)
-        run: build/iphone-photo-dl --self-test
+        run: '"$APP/Contents/MacOS/iphone-photo-dl" --self-test'
 
       - name: Self test (x86_64 via Rosetta)
         run: |
           if arch -x86_64 /usr/bin/true 2>/dev/null; then
-            arch -x86_64 build/iphone-photo-dl --self-test
+            arch -x86_64 "$APP/Contents/MacOS/iphone-photo-dl" --self-test
           else
             echo "Rosetta 없음 — x86_64 실행 시험 건너뜀"
           fi
 
-      - name: Smoke test without iPhone (expect exit 3)
+      - name: CLI smoke test without iPhone (expect exit 3)
         run: |
-          build/iphone-photo-dl --version
-          build/iphone-photo-dl --help | head -n 5
+          B="$APP/Contents/MacOS/iphone-photo-dl"
+          "$B" --version
+          "$B" --help | head -n 6
           set +e
-          build/iphone-photo-dl --list --timeout 3 "$RUNNER_TEMP/out"
+          "$B" --list --timeout 3 "$RUNNER_TEMP/out"
           code=$?
           set -e
           echo "exit code: $code"
           test "$code" -eq 3
           test ! -e "$RUNNER_TEMP/out"   # --list 는 아무것도 만들지 않는다
 
+      - name: App window test (screenshot)
+        run: |
+          open "$APP"
+          sleep 8
+          pgrep -fl "MacOS/iphone-photo-dl" || { echo "앱이 떠 있지 않음"; exit 1; }
+          screencapture -x build/app-window.png || echo "화면 캡처 실패"
+          pkill -f "MacOS/iphone-photo-dl" || true
+          echo "--- 기록"
+          tail -n 20 "$HOME/Library/Logs/iphone-photo-dl.log"
+          grep -q "시작" "$HOME/Library/Logs/iphone-photo-dl.log"
+
       - name: Package
         run: |
+          ditto -c -k --keepParent "$APP" build/iPhonePhotoDL-app.zip
+          # 0.9 설치 스크립트용(터미널 실행 파일만)
           tar -czf build/iphone-photo-dl-macos.tar.gz -C build iphone-photo-dl
-          shasum -a 256 build/iphone-photo-dl-macos.tar.gz | tee build/SHA256.txt
+          shasum -a 256 build/iPhonePhotoDL-app.zip build/iphone-photo-dl-macos.tar.gz | tee build/SHA256.txt
 
       - name: Install script test (local package)
         run: |
-          IPHONE_PHOTO_DL_ASSET_URL="file://$PWD/build/iphone-photo-dl-macos.tar.gz" bash install.sh
+          IPHONE_PHOTO_DL_NO_LAUNCH=1 IPHONE_PHOTO_DL_ASSET_URL="file://$PWD/build/iPhonePhotoDL-app.zip" bash install.sh
+          ls -la /Applications | grep "아이폰" || ls -la "$HOME/Applications"
           "$HOME/.iphone-photo-dl/bin/iphone-photo-dl" --version
-          L="$HOME/Desktop/아이폰 사진 받기.command"
-          [ -x "$L" ] || L="$HOME/.iphone-photo-dl/아이폰 사진 받기.command"
-          test -x "$L"
-          bash -n "$L"
-          head -n 3 "$L"
+          ls -la "$HOME/Desktop" | grep "아이폰" || echo "(바탕화면 바로가기 없음)"
 
       - uses: actions/upload-artifact@v4
         with:
           name: iphone-photo-dl-macos
           path: |
+            build/iPhonePhotoDL-app.zip
             build/iphone-photo-dl-macos.tar.gz
             build/SHA256.txt
+            build/app-window.png
+            build/icon.png
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" build/iphone-photo-dl-macos.tar.gz build/SHA256.txt \
+          gh release create "$GITHUB_REF_NAME" build/iPhonePhotoDL-app.zip build/iphone-photo-dl-macos.tar.gz build/SHA256.txt \
             --title "$GITHUB_REF_NAME" \
-            --notes "macOS 10.15 이상(Intel·Apple Silicon 공용). 설치: curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash"
+            --notes "macOS 10.15 이상(Intel·Apple Silicon 공용). 설치·업데이트: 터미널에 curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash"
