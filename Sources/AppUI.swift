@@ -61,6 +61,17 @@ struct ScreenState {
     var notices = Set<Notice>()
     var closedAppNames: [String] = []
     var lastResult: String?
+    var batchMode = false
+    var batchNumber = 0
+    var batchCount = 0
+    var summary: BatchSummary?
+    var sessionDoneCount = 0
+    var sessionDoneBytes: Int64 = 0
+    var deletedPhotos = 0
+    var deletedFiles = 0
+    var deleteFailures = 0
+    var iCloudOn = false
+    var deleteBlockedHint: String?
 
     init() {}
 
@@ -85,6 +96,17 @@ struct ScreenState {
         notices = e.notices
         closedAppNames = e.closedAppNames
         lastResult = e.lastResult
+        batchMode = e.batchMode
+        batchNumber = e.batchIndex + 1
+        batchCount = e.batches.count
+        summary = e.batchSummary
+        sessionDoneCount = e.sessionDoneCount
+        sessionDoneBytes = e.sessionDoneBytes
+        deletedPhotos = e.deletedPhotos
+        deletedFiles = e.deletedFiles
+        deleteFailures = e.deleteFailures
+        iCloudOn = e.iCloudOn
+        deleteBlockedHint = e.deleteBlockedHint
     }
 
     static func preview(_ name: String?) -> ScreenState? {
@@ -118,6 +140,32 @@ struct ScreenState {
             s.notices = [.stalled, .iCloudOn]
         case "failed":
             s.stage = .failed("아이폰과의 전송이 멈췄습니다.\n케이블을 뺐다 다시 꽂아 주세요. 받은 것은 건너뛰고 이어서 받습니다.")
+        case "batch":
+            s.stage = .downloading
+            s.isBusy = true
+            s.batchMode = true
+            s.batchNumber = 2
+            s.batchCount = 15
+            s.jobTotalCount = 412
+            s.jobTotalBytes = 2_100_000_000
+            s.doneCount = 120
+            s.currentBytes = 610_000_000
+            s.speed = 27_000_000
+            s.remainingSeconds = 55
+        case "confirm":
+            s.stage = .confirmDelete
+            s.isBusy = true
+            s.batchMode = true
+            s.batchNumber = 2
+            s.batchCount = 15
+            s.iCloudOn = true
+            var c = DateComponents()
+            c.year = 2026; c.month = 9; c.day = 12
+            let oldest = Calendar.current.date(from: c)
+            c.month = 10; c.day = 31
+            let newest = Calendar.current.date(from: c)
+            s.summary = BatchSummary(number: 2, count: 15, photos: 298, files: 412, bytes: 2_100_000_000,
+                                     newest: newest, oldest: oldest, unverifiedPhotos: 2, deletable: [])
         default:
             s.stage = .searching
         }
@@ -137,6 +185,8 @@ final class MainWindow: NSObject, NSWindowDelegate {
     private let updateLabel = NSTextField(labelWithString: "")
     private var changeButton: NSButton!
     private var actionButton: NSButton!
+    private var secondButton: NSButton!
+    private var batchCheckbox: NSButton!
     private var openButton: NSButton!
     private var logButton: NSButton!
     private var updateButton: NSButton!
@@ -144,14 +194,24 @@ final class MainWindow: NSObject, NSWindowDelegate {
 
     private var quitConfirmed = false
     private var announcedFinish = false
+    private var confirmShownAt: Date?
     private var newerVersion: String?
-    /// 화면 모양 시험용(빌드 서버): IPDL_UI_PREVIEW=downloading|locked|partial|failed
+    /// 화면 모양 시험용(빌드 서버): IPDL_UI_PREVIEW=downloading|locked|partial|failed|batch|confirm
     private let previewState = ScreenState.preview(ProcessInfo.processInfo.environment["IPDL_UI_PREVIEW"])
 
     private static let folderKey = "destination"
+    private static let batchKey = "batchDelete"
+    static let batchSize = 300
+
+    /// '최근 사진부터 300장씩 받고 지울지 묻기' (처음에는 켬)
+    private static var batchOn: Bool {
+        return UserDefaults.standard.object(forKey: batchKey) as? Bool ?? true
+    }
 
     override init() {
-        engine = Engine(config: EngineConfig(destination: MainWindow.initialDestination()))
+        var cfg = EngineConfig(destination: MainWindow.initialDestination())
+        cfg.batchSize = MainWindow.batchOn ? MainWindow.batchSize : nil
+        engine = Engine(config: cfg)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 300),
                           styleMask: [.titled, .closable, .miniaturizable],
                           backing: .buffered, defer: false)
@@ -195,7 +255,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
         headline.lineBreakMode = .byTruncatingTail
         detail.font = NSFont.systemFont(ofSize: 13)
         detail.textColor = .secondaryLabelColor
-        detail.maximumNumberOfLines = 5
+        detail.maximumNumberOfLines = 8
         detail.preferredMaxLayoutWidth = 532
         detail.setContentCompressionResistancePriority(.required, for: .vertical)
         bar.style = .bar
@@ -216,10 +276,16 @@ final class MainWindow: NSObject, NSWindowDelegate {
         logButton = NSButton(title: "기록 보기", target: self, action: #selector(openLog))
         actionButton = NSButton(title: "멈춤", target: self, action: #selector(primaryAction))
         actionButton.keyEquivalent = "\r"
+        secondButton = NSButton(title: "지우지 않고 다음", target: self, action: #selector(secondAction))
+        secondButton.isHidden = true
         updateButton = NSButton(title: "업데이트", target: self, action: #selector(runUpdate))
-        for b in [changeButton!, openButton!, logButton!, actionButton!, updateButton!] {
+        for b in [changeButton!, openButton!, logButton!, actionButton!, secondButton!, updateButton!] {
             b.bezelStyle = .rounded
         }
+        batchCheckbox = NSButton(checkboxWithTitle: "최근 사진부터 \(MainWindow.batchSize)장씩 받고, 맥에 저장된 것을 확인한 뒤 아이폰에서 지울지 묻기",
+                                 target: self, action: #selector(toggleBatch))
+        batchCheckbox.state = MainWindow.batchOn ? .on : .off
+        batchCheckbox.font = NSFont.systemFont(ofSize: 12)
 
         updateLabel.font = NSFont.systemFont(ofSize: 12)
         updateLabel.textColor = .systemBlue
@@ -234,7 +300,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let buttonRow = NSStackView(views: [logButton, spacer, openButton, actionButton])
+        let buttonRow = NSStackView(views: [logButton, spacer, openButton, secondButton, actionButton])
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
 
@@ -249,7 +315,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
         top.setCustomSpacing(8, after: headline)
         top.translatesAutoresizingMaskIntoConstraints = false
 
-        let bottom = NSStackView(views: [sep, folderRow, buttonRow])
+        let bottom = NSStackView(views: [sep, batchCheckbox, folderRow, buttonRow])
         bottom.orientation = .vertical
         bottom.alignment = .leading
         bottom.spacing = 12
@@ -267,7 +333,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
             bottom.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
             bottom.topAnchor.constraint(greaterThanOrEqualTo: top.bottomAnchor, constant: 20),
             content.widthAnchor.constraint(equalToConstant: 580),
-            content.heightAnchor.constraint(greaterThanOrEqualToConstant: 300),
+            content.heightAnchor.constraint(greaterThanOrEqualToConstant: 330),
         ]
         for v in [headline, detail, bar] as [NSView] {
             constraints.append(v.widthAnchor.constraint(equalTo: top.widthAnchor))
@@ -293,6 +359,8 @@ final class MainWindow: NSObject, NSWindowDelegate {
         var pct = 0.0
         var st = ""
         var action: String?
+        var second: String?
+        var actionIsDelete = false
 
         switch e.stage {
         case .searching:
@@ -311,8 +379,9 @@ final class MainWindow: NSObject, NSWindowDelegate {
             h = "목록 확인 끝"
         case .downloading, .paused:
             let paused = e.stage == .paused
-            h = paused ? "멈춤 — \(formatCount(e.doneCount)) / \(formatCount(e.jobTotalCount))개"
-                       : "받는 중  \(formatCount(e.doneCount)) / \(formatCount(e.jobTotalCount))개"
+            let prefix = e.batchMode ? "묶음 \(e.batchNumber)/\(e.batchCount) · " : ""
+            h = prefix + (paused ? "멈춤 — \(formatCount(e.doneCount)) / \(formatCount(e.jobTotalCount))개"
+                                 : "받는 중  \(formatCount(e.doneCount)) / \(formatCount(e.jobTotalCount))개")
             d = tips(e).joined(separator: "\n")
             if d.isEmpty {
                 d = "받는 동안 아이폰 화면이 꺼지지 않게 해 두면 좋습니다 (설정 > 디스플레이 및 밝기 > 자동 잠금 > 안 함).\n노트북은 전원을 연결해 두세요."
@@ -324,6 +393,44 @@ final class MainWindow: NSObject, NSWindowDelegate {
                 st += " · \(formatBytes(Int64(e.speed)))/s · 남은 시간 \(formatDuration(e.remainingSeconds))"
             }
             action = paused ? "계속" : "멈춤"
+        case .confirmDelete:
+            let s = e.summary
+            let photos = s?.photos ?? 0
+            h = "\(formatCount(photos))장 확인 끝 — 아이폰에서 지울까요?"
+            var lines: [String] = []
+            var info = "묶음 \(e.batchNumber)/\(e.batchCount)"
+            if let a = s?.oldest, let b = s?.newest { info += " · 찍은 날짜 \(dayText(a)) ~ \(dayText(b))" }
+            info += " · 파일 \(formatCount(s?.files ?? 0))개, \(formatBytes(s?.bytes ?? 0))"
+            lines.append(info)
+            lines.append("맥에 저장된 것을 하나하나 확인했습니다. '폴더 열기'로 먼저 보셔도 됩니다.")
+            if let u = s?.unverifiedPhotos, u > 0 {
+                lines.append("맥에 저장이 확인되지 않은 \(u)장은 지우지 않습니다.")
+            }
+            if e.iCloudOn {
+                lines.append("주의: iCloud 사진이 켜져 있어, 지우면 iCloud 와 다른 기기에서도 지워질 수 있습니다.")
+            }
+            if let hint = e.deleteBlockedHint { lines.append(hint) }
+            if e.isLocked { lines.append("아이폰 잠금을 풀어 두세요 — 잠겨 있으면 지우지 못할 수 있습니다.") }
+            d = lines.joined(separator: "\n")
+            if photos > 0 {
+                action = "아이폰에서 \(formatCount(photos))장 지우기"
+                actionIsDelete = true
+            }
+            second = e.batchNumber < e.batchCount ? "지우지 않고 다음 묶음" : "지우지 않고 끝내기"
+        case .deleting:
+            h = "아이폰에서 지우는 중…"
+            d = "끝나면 다음 묶음을 받습니다. 케이블을 빼지 말아 주세요."
+        case .finished where e.batchMode:
+            h = "끝! \(formatCount(e.sessionDoneCount))개 받음 · 아이폰에서 \(formatCount(e.deletedPhotos))장 지움"
+            var lines = ["받은 용량 \(formatBytes(e.sessionDoneBytes)) · 지운 파일 \(formatCount(e.deletedFiles))개 (Live Photo 동영상·편집본 포함)"]
+            if e.deleteFailures > 0 { lines.append("지우지 못한 파일 \(formatCount(e.deleteFailures))개 — '기록 보기'에 이유가 있습니다.") }
+            if e.failedCount > 0 {
+                lines.append("받지 못한 \(formatCount(e.failedCount))개는 지우지 않았습니다. '다시 받기'를 누르세요.")
+                action = "다시 받기"
+                headline.textColor = .systemOrange
+            }
+            lines.append("지운 파일 목록은 저장 폴더 안 .iphone-photo-dl/deleted.tsv 에 남습니다.")
+            d = lines.joined(separator: "\n")
         case .finished:
             if e.jobTotalCount == 0 {
                 h = "새 사진이 없습니다"
@@ -366,10 +473,27 @@ final class MainWindow: NSObject, NSWindowDelegate {
         stats.stringValue = st
         actionButton.isHidden = action == nil
         if let a = action { actionButton.title = a }
+        // 지우기 단추는 Enter 로 눌리지 않게 하고, Enter 는 '지우지 않고 다음'에 준다.
+        actionButton.keyEquivalent = actionIsDelete ? "" : "\r"
+        secondButton.isHidden = second == nil
+        if let t = second { secondButton.title = t }
+        secondButton.keyEquivalent = second != nil ? "\r" : ""
         changeButton.isEnabled = !e.isBusy
+        batchCheckbox.isEnabled = !e.isBusy
         updateRow.isHidden = newerVersion == nil || e.isBusy
 
-        if e.stage == .finished && e.jobTotalCount > 0 {
+        if e.stage == .confirmDelete {
+            if confirmShownAt == nil { confirmShownAt = Date() }
+        } else {
+            confirmShownAt = nil
+        }
+        if e.stage == .confirmDelete {
+            if !announcedFinish {
+                announcedFinish = true
+                NSSound(named: "Glass")?.play()
+                NSApp.requestUserAttention(.informationalRequest)
+            }
+        } else if e.stage == .finished && (e.jobTotalCount > 0 || e.batchMode) {
             if !announcedFinish {
                 announcedFinish = true
                 NSSound(named: "Glass")?.play()
@@ -403,9 +527,24 @@ final class MainWindow: NSObject, NSWindowDelegate {
         switch engine.stage {
         case .downloading: engine.pause()
         case .paused: engine.resume()
+        case .confirmDelete:
+            // 질문이 막 뜬 순간의 클릭(예: '멈춤'을 누르려던 것)은 무시한다.
+            guard let shown = confirmShownAt, Date().timeIntervalSince(shown) > 1.5 else { NSSound.beep(); return }
+            engine.deleteCurrentBatch()
         case .finished, .failed: engine.retry()
         default: break
         }
+    }
+
+    @objc private func secondAction() {
+        if engine.stage == .confirmDelete { engine.keepCurrentBatch() }
+    }
+
+    @objc private func toggleBatch() {
+        let on = batchCheckbox.state == .on
+        UserDefaults.standard.set(on, forKey: MainWindow.batchKey)
+        engine.setBatchMode(on ? MainWindow.batchSize : nil)
+        render()
     }
 
     @objc private func changeFolder() {

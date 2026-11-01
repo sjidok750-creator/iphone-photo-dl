@@ -23,8 +23,23 @@ enum Stage: Equatable {
     case planned       // 계획만(터미널 --list / --dry-run)
     case downloading
     case paused        // 사용자가 멈춤
+    case confirmDelete // 묶음을 받고 확인함 — 아이폰에서 지울지 묻는 중
+    case deleting      // 아이폰에서 지우는 중
     case finished
     case failed(String)
+}
+
+/// 한 묶음을 받고 맥에 저장된 것을 확인한 결과
+struct BatchSummary {
+    let number: Int            // 몇 번째 묶음 (1부터)
+    let count: Int             // 전체 묶음 수
+    let photos: Int            // 확인된 사진(묶음) 수 = 지울 수 있는 것
+    let files: Int             // 그 파일 수 (Live Photo 동영상·편집본 포함)
+    let bytes: Int64
+    let newest: Date?
+    let oldest: Date?
+    let unverifiedPhotos: Int  // 맥에 저장이 확인되지 않아 지우지 않을 사진 수
+    let deletable: [MediaInfo]
 }
 
 enum Notice: Hashable {
@@ -47,6 +62,8 @@ struct EngineConfig {
     var requestOriginals = false
     var planOnly = false
     var quitInterferingApps = true
+    var newestFirst = false
+    var batchSize: Int?        // 있으면: 최근 것부터 N장씩 받고, 확인 후 지울지 묻기
 }
 
 final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCameraDeviceDownloadDelegate {
@@ -75,7 +92,18 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
     private(set) var lastResult: String?
     private(set) var closedAppNames: [String] = []
     private(set) var failed: [String: (display: String, reason: String)] = [:]
+    private(set) var batches: [[MediaInfo]] = []
+    private(set) var batchIndex = 0
+    private(set) var batchSummary: BatchSummary?
+    private(set) var sessionDoneCount = 0     // 이번 실행에서 받은 파일 (묶음을 넘어 누적)
+    private(set) var sessionDoneBytes: Int64 = 0
+    private(set) var deletedFiles = 0
+    private(set) var deletedPhotos = 0
+    private(set) var deleteFailures = 0
+    private(set) var deleteBlockedHint: String?
+    private(set) var iCloudOn = false
 
+    var batchMode: Bool { return config.batchSize != nil && !config.planOnly }
     var destination: String { return config.destination }
     var failedCount: Int { return failed.count }
     var currentBytes: Int64 { return doneBytes + partial.values.reduce(0, +) }
@@ -85,7 +113,7 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
     var elapsed: Double { return Date().timeIntervalSince(jobStartedAt) }
     var isBusy: Bool {
         switch stage {
-        case .connecting, .cataloging, .downloading, .paused: return true
+        case .connecting, .cataloging, .downloading, .paused, .confirmDelete, .deleting: return true
         default: return false
         }
     }
@@ -102,6 +130,7 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
     private var activity: NSObjectProtocol?
 
     private var cameraFiles: [ICCameraFile] = []
+    private var removedItems = Set<ObjectIdentifier>()
     private var manifest: Manifest?
     private var resumeJob = false
 
@@ -125,6 +154,7 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
     private var jobStartedAt = Date()
     private var samples: [(t: Date, bytes: Int64)] = []
     private var lastMilestone = 0
+    private var deleteStartedAt = Date()
 
     private let interferingApps: Set<String> = ["com.apple.Photos", "com.apple.Image_Capture"]
 
@@ -132,6 +162,7 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
     private var stateDir: URL { return destRoot.appendingPathComponent(stateDirName, isDirectory: true) }
     private var tmpDir: URL { return stateDir.appendingPathComponent("tmp", isDirectory: true) }
     var failedListURL: URL { return stateDir.appendingPathComponent("failed.txt") }
+    var deletedListURL: URL { return stateDir.appendingPathComponent("deleted.tsv") }
 
     init(config: EngineConfig) {
         self.config = config
@@ -142,7 +173,8 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
 
     func start() {
         log("=== \(appDisplayName) \(appVersion) 시작 · \(systemDescription()) · 저장 \(config.destination)")
-        log("설정: 줄 \(config.window) · 원본 요청 \(config.requestOriginals ? "켬" : "끔") · 배치 \(config.layout.rawValue)")
+        log("설정: 줄 \(config.window) · 원본 요청 \(config.requestOriginals ? "켬" : "끔") · 배치 \(config.layout.rawValue)"
+            + (batchMode ? " · 최근 것부터 \(config.batchSize!)장씩 받고 지울지 묻기" : ""))
         browser.delegate = self
         let mask = ICDeviceTypeMask.camera.rawValue | ICDeviceLocationTypeMask.local.rawValue
         browser.browsedDeviceTypeMask = ICDeviceTypeMask(rawValue: mask)!
@@ -197,6 +229,65 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         } else {
             planAndStart()
         }
+    }
+
+    /// 최근 것부터 N장씩 받고 지울지 묻기 (nil = 끔)
+    func setBatchMode(_ size: Int?) {
+        guard !isBusy else { return }
+        config.batchSize = size
+        log("묶음 모드: \(size.map { "\($0)장씩" } ?? "끔")")
+        if camera != nil && !cameraFiles.isEmpty {
+            failed.removeAll()
+            resumeJob = false
+            planAndStart()
+        } else {
+            changed()
+        }
+    }
+
+    /// 확인한 묶음을 아이폰에서 지운다 (맥에 저장이 확인된 파일만)
+    func deleteCurrentBatch() {
+        guard stage == .confirmDelete, let s = batchSummary, let cam = camera else { return }
+        var items: [ICCameraItem] = []
+        var byObject: [ObjectIdentifier: MediaInfo] = [:]
+        for m in s.deletable where m.id < cameraFiles.count {
+            let f = cameraFiles[m.id]
+            items.append(f)
+            byObject[ObjectIdentifier(f)] = m
+        }
+        guard !items.isEmpty else {
+            nextBatch()
+            return
+        }
+        stage = .deleting
+        deleteStartedAt = Date()
+        log("지우기 요청: 묶음 \(s.number)/\(s.count), 사진 \(s.photos)장, 파일 \(items.count)개")
+        changed()
+        _ = cam.requestDeleteFiles(items, deleteFailed: { [weak self] failures in
+            DispatchQueue.main.async {
+                for (reason, item) in failures {
+                    self?.log("지우기 실패: \(item.name ?? "?") (\(reason.rawValue))")
+                }
+            }
+        }, completion: { [weak self] results, error in
+            DispatchQueue.main.async {
+                self?.deleteFinished(results: results, error: error, summary: s, byObject: byObject)
+            }
+        })
+    }
+
+    /// 지우지 않고 다음 묶음으로
+    func keepCurrentBatch() {
+        guard stage == .confirmDelete else { return }
+        log("묶음 \(batchIndex + 1): 지우지 않음")
+        nextBatch()
+    }
+
+    /// 묶음 그만 (지금까지로 끝)
+    func stopBatches() {
+        guard stage == .confirmDelete else { return }
+        log("묶음 그만")
+        complete()
     }
 
     func setDestination(_ path: String) {
@@ -286,8 +377,8 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
     private func deviceGone() {
         guard camera != nil else { return }
         disconnects += 1
-        let wasWorking = stage == .downloading || stage == .paused
-        if wasWorking { resumeJob = true }
+        if isBusy && stage != .connecting && stage != .cataloging { resumeJob = true }
+        batchSummary = nil
         message("아이폰 연결이 끊어졌습니다. 다시 꽂으면 받은 것은 건너뛰고 이어서 받습니다.")
         clearRequests()
         cameraFiles = []
@@ -381,7 +472,9 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         }
     }
 
-    func cameraDevice(_ camera: ICCameraDevice, didRemove items: [ICCameraItem]) {}
+    func cameraDevice(_ camera: ICCameraDevice, didRemove items: [ICCameraItem]) {
+        for i in items { removedItems.insert(ObjectIdentifier(i)) }
+    }
     func cameraDevice(_ camera: ICCameraDevice, didReceiveThumbnail thumbnail: CGImage?, for item: ICCameraItem, error: Error?) {}
     func cameraDevice(_ camera: ICCameraDevice, didReceiveMetadata metadata: [AnyHashable: Any]?, for item: ICCameraItem, error: Error?) {}
     func cameraDevice(_ camera: ICCameraDevice, didRenameItems items: [ICCameraItem]) {}
@@ -423,7 +516,14 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         message("목록 읽기 끝: \(formatCount(cameraFiles.count))개 (\(formatDuration(took)))")
         if cam.responds(to: #selector(getter: ICCameraDevice.iCloudPhotosEnabled)), cam.iCloudPhotosEnabled {
             notices.insert(.iCloudOn)
+            iCloudOn = true
             log("iCloud 사진 켜짐")
+        }
+        log("기기 기능: \(cam.capabilities.joined(separator: ", "))")
+        deleteBlockedHint = nil
+        if cam.responds(to: #selector(getter: ICCameraDevice.isLocked)), cam.isLocked {
+            deleteBlockedHint = "이 아이폰은 지금 지우기를 막고 있다고 알려 왔습니다. '아이폰에서 지우기'를 눌러도 지워지지 않을 수 있습니다."
+            log("지우기 잠김(isLocked) = 예")
         }
         planAndStart()
     }
@@ -431,6 +531,11 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
     // MARK: - 계획
 
     private func planAndStart() {
+        // 아이폰에서 지워진 것(이 앱이 지웠거나 다른 데서 지움)은 목록에서 뺀다.
+        if !removedItems.isEmpty {
+            cameraFiles = cameraFiles.filter { !removedItems.contains(ObjectIdentifier($0)) }
+            removedItems.removeAll()
+        }
         var media: [MediaInfo] = []
         media.reserveCapacity(cameraFiles.count)
         for (i, f) in cameraFiles.enumerated() {
@@ -446,7 +551,8 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         opts.layout = config.layout
         opts.kinds = config.kinds
         opts.since = config.since
-        opts.limit = config.limit
+        opts.limit = batchMode ? nil : config.limit
+        opts.newestFirst = config.newestFirst || batchMode
         let root = destRoot
         let fm = self.fm
         plan = makePlan(media: media, options: opts, manifest: man.entries) { rel in
@@ -468,10 +574,14 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
             changed()
             return
         }
-        beginDownloading()
+        if batchMode {
+            setupBatches()
+        } else {
+            beginDownloading()
+        }
     }
 
-    private func beginDownloading() {
+    private func prepareFolders() -> Bool {
         do {
             try fm.createDirectory(at: stateDir, withIntermediateDirectories: true)
             removeTmp()
@@ -479,9 +589,14 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         } catch {
             log("폴더 만들기 실패: \(describeError(error))")
             fail("저장 폴더를 만들 수 없습니다: \(config.destination)\n\(error.localizedDescription)", kind: .storage)
-            return
+            return false
         }
         for a in plan.adopted { manifest?.record(key: a.key, relPath: a.relPath) }
+        return true
+    }
+
+    private func beginDownloading() {
+        guard prepareFolders() else { return }
 
         if plan.items.isEmpty {
             if !resumeJob {
@@ -510,11 +625,16 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
             jobStartedAt = Date()
             lastMilestone = 0
         }
+        message("받기 시작: \(formatCount(plan.items.count))개, \(formatBytes(plan.bytesToDownload))")
+        startQueue(Array(plan.items.indices))
+    }
+
+    private func startQueue(_ indices: [Int]) {
         if activity == nil {
             activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled],
                                                              reason: "아이폰 사진 받는 중")
         }
-        pending = Array(plan.items.indices)
+        pending = indices
         pendingPos = 0
         attempts = [:]
         consecutiveStalls = 0
@@ -522,9 +642,148 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         samples = [(t: Date(), bytes: currentBytes)]
         lastProgressAt = Date()
         stage = .downloading
-        message("받기 시작: \(formatCount(plan.items.count))개, \(formatBytes(plan.bytesToDownload))")
         changed()
         pump()
+    }
+
+    // MARK: - 묶음: 최근 것부터 N장씩 받기 → 맥에서 확인 → 지울지 묻기
+
+    private func setupBatches() {
+        guard prepareFolders() else { return }
+        let size = config.batchSize ?? 300
+        let candidates = plan.items.map { $0.media } + plan.present.map { $0.media }
+        batches = makeBatches(candidates, size: size)
+        batchIndex = 0
+        if !resumeJob {
+            sessionDoneCount = 0
+            sessionDoneBytes = 0
+            deletedFiles = 0
+            deletedPhotos = 0
+            deleteFailures = 0
+            jobStartedAt = Date()
+        }
+        resumeJob = false
+        message("최근 사진부터 \(size)장씩: 사진 \(formatCount(photoCount(candidates)))장, \(formatCount(batches.count))묶음")
+        startBatch()
+    }
+
+    private func startBatch() {
+        guard batchIndex < batches.count else {
+            complete()
+            return
+        }
+        batchSummary = nil
+        let batch = batches[batchIndex]
+        let ids = Set(batch.map { $0.id })
+        let indices = plan.items.indices.filter { ids.contains(plan.items[$0].media.id) }
+        let bytes = indices.reduce(Int64(0)) { $0 + plan.items[$1].media.size }
+        jobTotalCount = indices.count
+        jobTotalBytes = bytes
+        doneCount = 0
+        doneBytes = 0
+        lastMilestone = 0
+        message("묶음 \(batchIndex + 1)/\(batches.count): 사진 \(photoCount(batch))장 — 새로 받을 파일 \(formatCount(indices.count))개, \(formatBytes(bytes))")
+        if indices.isEmpty {
+            batchDownloaded()
+            return
+        }
+        if let free = freeSpace(), free < bytes + 500_000_000 {
+            fail("저장 공간이 부족합니다: 필요 \(formatBytes(bytes)), 남은 공간 \(formatBytes(free)).\n'바꾸기'로 외장 디스크 폴더를 고르세요.", kind: .storage)
+            return
+        }
+        startQueue(indices)
+    }
+
+    /// 묶음을 다 받았으면 사진마다 맥에 저장된 것을 확인하고, 지울지 묻는다.
+    private func batchDownloaded() {
+        let batch = batches[batchIndex]
+        var groups: [String: [MediaInfo]] = [:]
+        for m in batch { groups[assetGroupKey(m), default: []].append(m) }
+        var deletable: [MediaInfo] = []
+        var unverified = 0
+        var bytes: Int64 = 0
+        for (key, files) in groups {
+            if files.allSatisfy({ verifiedOnDisk($0) }) {
+                deletable += files
+                bytes += files.reduce(Int64(0)) { $0 + $1.size }
+            } else {
+                unverified += 1
+                log("맥에 저장 확인 안 됨 → 지우지 않음: \(key)")
+            }
+        }
+        let dates = deletable.compactMap { $0.date }
+        batchSummary = BatchSummary(number: batchIndex + 1, count: batches.count,
+                                    photos: groups.count - unverified, files: deletable.count, bytes: bytes,
+                                    newest: dates.max(), oldest: dates.min(),
+                                    unverifiedPhotos: unverified, deletable: deletable)
+        endActivity()
+        stage = .confirmDelete
+        var text = "묶음 \(batchIndex + 1)/\(batches.count): 사진 \(formatCount(groups.count - unverified))장(파일 \(formatCount(deletable.count))개, \(formatBytes(bytes)))이 맥에 저장된 것을 확인했습니다."
+        if unverified > 0 { text += " 확인되지 않은 \(unverified)장은 지우지 않습니다." }
+        message(text)
+        changed()
+    }
+
+    /// 받은 목록에 있고, 그 파일이 실제로 있고, 크기가 맞는가
+    private func verifiedOnDisk(_ m: MediaInfo) -> Bool {
+        guard let rel = manifest?.entries[manifestKey(m)] else { return false }
+        let path = destRoot.appendingPathComponent(rel).path
+        guard let a = try? fm.attributesOfItem(atPath: path),
+              (a[.type] as? FileAttributeType) == .typeRegular,
+              let size = (a[.size] as? NSNumber)?.int64Value, size > 0 else { return false }
+        if size == m.size { return true }
+        // 아이폰이 변환해서 보낸 파일(확장자가 바뀜)은 크기가 원래와 다르다
+        return (rel as NSString).pathExtension.lowercased() != (m.name as NSString).pathExtension.lowercased()
+    }
+
+    private func deleteFinished(results: [ICDeleteResult: [ICCameraItem]], error: Error?,
+                                summary s: BatchSummary, byObject: [ObjectIdentifier: MediaInfo]) {
+        guard stage == .deleting else {
+            log("늦은 지우기 결과(무시): 성공 \(results[.successful]?.count ?? 0)")
+            return
+        }
+        let ok = results[.successful] ?? []
+        let bad = (results[.failed] ?? []).count + (results[.canceled] ?? []).count
+        if let e = error { log("지우기 오류: \(describeError(e))") }
+
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        var text = ""
+        var okKeys = Set<String>()
+        for item in ok {
+            let oid = ObjectIdentifier(item)
+            removedItems.insert(oid)
+            if let m = byObject[oid] {
+                okKeys.insert(manifestKey(m))
+                text += "\(stamp)\t\(m.folder)/\(m.name)\t\(manifest?.entries[manifestKey(m)] ?? "")\n"
+            }
+        }
+        if !text.isEmpty {
+            if !fm.fileExists(atPath: deletedListURL.path) {
+                fm.createFile(atPath: deletedListURL.path, contents: nil)
+            }
+            if let h = try? FileHandle(forWritingTo: deletedListURL), let d = text.data(using: .utf8) {
+                h.seekToEndOfFile()
+                h.write(d)
+                h.closeFile()
+            }
+        }
+        var groups: [String: [MediaInfo]] = [:]
+        for m in s.deletable { groups[assetGroupKey(m), default: []].append(m) }
+        let photosGone = groups.values.filter { $0.allSatisfy { okKeys.contains(manifestKey($0)) } }.count
+        deletedFiles += ok.count
+        deletedPhotos += photosGone
+        deleteFailures += bad
+        message("아이폰에서 지움: 사진 \(formatCount(photosGone))장(파일 \(formatCount(ok.count))개)" + (bad > 0 ? " · 지우지 못함 \(bad)개" : ""))
+        if ok.isEmpty && s.files > 0 {
+            deleteBlockedHint = "아이폰이 지우기를 받아들이지 않았습니다. 아이폰 잠금을 풀고 다시 해 보세요. iCloud 사진이 켜져 있으면 케이블로는 지울 수 없을 수 있습니다."
+            message(deleteBlockedHint!)
+        }
+        nextBatch()
+    }
+
+    private func nextBatch() {
+        batchIndex += 1
+        startBatch()
     }
 
     private func freeSpace() -> Int64? {
@@ -565,7 +824,11 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
                                     contextInfo: UnsafeMutableRawPointer(bitPattern: rid))
         }
         if requests.isEmpty && pendingPos >= pending.count {
-            complete()
+            if batchMode {
+                batchDownloaded()
+            } else {
+                complete()
+            }
         }
     }
 
@@ -604,6 +867,8 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
                 try place(item: item, from: tmpDir.appendingPathComponent(saved))
                 doneCount += 1
                 doneBytes += item.media.size
+                sessionDoneCount += 1
+                sessionDoneBytes += item.media.size
                 failed.removeValue(forKey: key)
                 consecutiveStalls = 0
                 consecutiveErrors = 0
@@ -697,6 +962,14 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
                 let quiet = now.timeIntervalSince(lastProgressAt)
                 if quiet > limit { handleStall(seconds: Int(quiet)) }
             }
+        case .deleting:
+            if now.timeIntervalSince(deleteStartedAt) > 300 {
+                log("지우기 응답 없음 5분 → 다음 묶음")
+                deleteBlockedHint = "아이폰이 지우기에 답하지 않았습니다. 아이폰 잠금을 풀어 두고, 끝난 뒤 아이폰 사진 앱에서 지워졌는지 확인해 주세요."
+                message(deleteBlockedHint!)
+                nextBatch()
+                return
+            }
         default:
             break
         }
@@ -777,7 +1050,16 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         }
         let el = Date().timeIntervalSince(jobStartedAt)
         let avg = el > 0 ? Double(doneBytes) / el : 0
-        if jobTotalCount == 0 {
+        if batchMode {
+            var text = "끝: 받음 \(formatCount(sessionDoneCount))개(\(formatBytes(sessionDoneBytes))) · 아이폰에서 지움 사진 \(formatCount(deletedPhotos))장(파일 \(formatCount(deletedFiles))개)"
+            if deleteFailures > 0 { text += " · 지우지 못함 \(deleteFailures)개" }
+            message(text)
+            if deletedFiles > 0 { message("지운 파일 목록: \(deletedListURL.path)") }
+            lastResult = "지난번: \(formatCount(sessionDoneCount))개 받음 · 아이폰에서 \(formatCount(deletedPhotos))장 지움"
+            if !failed.isEmpty {
+                message("받지 못한 것: \(formatCount(failed.count))개 → 목록 \(failedListURL.path)")
+            }
+        } else if jobTotalCount == 0 {
             message("새로 받을 사진이 없습니다. (이미 모두 받음)")
             lastResult = "지난번: 새 사진 없음 (이미 모두 받음)"
         } else {

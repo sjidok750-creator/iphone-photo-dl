@@ -3,7 +3,7 @@
 
 import Foundation
 
-let appVersion = "0.10.1"
+let appVersion = "0.11.0"
 let appDisplayName = "아이폰 사진 받기"
 let githubRepo = "sjidok750-creator/iphone-photo-dl"
 let installCommand = "curl -fsSL https://raw.githubusercontent.com/\(githubRepo)/main/install.sh | bash"
@@ -34,6 +34,8 @@ struct Options {
     var requestOriginals = false   // 0.10: 기본은 끔(Big Sur 에서 효과 미확인) — 아이폰 '원본 유지' 설정에 맡긴다
     var timeout: Double = 60
     var window = 2
+    var newestFirst = false
+    var batchSize: Int?            // 최근 것부터 N장씩 받고, 확인 후 아이폰에서 지울지 묻기
     var showHelp = false
     var showVersion = false
     var selfTest = false
@@ -64,6 +66,9 @@ iphone-photo-dl \(appVersion) — 아이폰 사진·동영상을 Mac 으로 한�
   --photos-only       사진만 (Live Photo 의 동영상 부분 제외)
   --videos-only       동영상만
   --limit 20          앞에서부터 이 개수만 (시험용)
+  --newest-first      최근 사진부터 받기
+  --batch 300         최근 사진부터 300장씩 받고, 맥에 저장된 것을 확인한 뒤
+                      아이폰에서 지울지 묶음마다 묻기 (지우려면 y 입력)
   --request-originals 아이폰에 원본(변환 안 한 파일)을 달라고 요청 (시험용, 기본 끔)
   --window 2          한 번에 줄 세우는 파일 수 (1~8)
   --timeout 60        아이폰을 기다리는 시간(초)
@@ -104,6 +109,12 @@ func parseArguments(_ args: [String]) throws -> Options {
         case "--cli": break   // 옵션 없이 터미널 모드로 받기
         case "--no-originals": o.requestOriginals = false   // 0.9 호환
         case "--request-originals": o.requestOriginals = true
+        case "--newest-first": o.newestFirst = true
+        case "--batch":
+            let v = try value(a)
+            guard let n = Int(v), (1...5000).contains(n) else { throw ArgError(description: "--batch 는 1~5000 장입니다 (입력: \(v))") }
+            o.batchSize = n
+            o.newestFirst = true
         case "--photos-only": o.kinds = .photos
         case "--videos-only": o.kinds = .videos
         case "--layout":
@@ -235,6 +246,7 @@ struct Plan {
     var filteredOut = 0            // --since / --photos-only 등으로 뺀 것
     var alreadyInManifest = 0      // 전에 받은 것
     var adopted: [(key: String, relPath: String)] = []  // 같은 이름·크기 파일이 이미 있어 받은 것으로 친 것
+    var present: [(media: MediaInfo, relPath: String)] = []  // 이미 맥에 있는 것(전에 받음 + 받은 것으로 침)
     var bytesToDownload: Int64 {
         return items.reduce(Int64(0)) { $0 + $1.media.size }
     }
@@ -280,6 +292,7 @@ func makePlan(media: [MediaInfo],
         let key = manifestKey(m)
         if let rp = manifest[key], existingSize(rp) != nil {
             plan.alreadyInManifest += 1
+            plan.present.append((media: m, relPath: rp))
             continue
         }
 
@@ -295,19 +308,95 @@ func makePlan(media: [MediaInfo],
                 if s == m.size {
                     // 다른 도구로 이미 받은 같은 파일
                     plan.adopted.append((key: key, relPath: rp))
+                    plan.present.append((media: m, relPath: rp))
                     taken.insert(lower)
                     break
                 }
                 n += 1
                 continue
             }
-            if let limit = options.limit, plan.items.count >= limit { break }
             plan.items.append(PlannedItem(media: m, relDir: dir, fileName: name))
             taken.insert(lower)
             break
         }
     }
+    // 이름은 늘 오래된 것부터 정해(모드와 상관없이 같은 이름), 받는 순서만 바꾼다.
+    if options.newestFirst {
+        plan.items = sortNewestFirst(plan.items) { $0.media }
+    }
+    if let limit = options.limit, plan.items.count > limit {
+        plan.items = Array(plan.items.prefix(limit))
+    }
     return plan
+}
+
+/// 최근 것부터, 날짜 없는 것은 맨 뒤 (같으면 원래 순서)
+func sortNewestFirst<T>(_ list: [T], _ media: (T) -> MediaInfo) -> [T] {
+    return list.enumerated().sorted { a, b in
+        let x = media(a.element).date, y = media(b.element).date
+        switch (x, y) {
+        case let (p?, q?) where p != q: return p > q
+        case (nil, _?): return false
+        case (_?, nil): return true
+        default: return a.offset < b.offset
+        }
+    }.map { $0.element }
+}
+
+// MARK: - 묶음 (최근 것부터 N장씩 받고 지우기)
+
+/// 같은 사진에 딸린 파일을 한 묶음으로: IMG_1234.HEIC · IMG_1234.MOV(Live Photo) · IMG_E1234.HEIC(편집본) · IMG_O1234.AAE
+func assetGroupKey(_ m: MediaInfo) -> String {
+    var base = (m.name as NSString).deletingPathExtension
+    if let r = base.range(of: "^([A-Za-z]+_)[EO]([0-9]+)$", options: .regularExpression) {
+        let s = String(base[r])
+        if let us = s.firstIndex(of: "_") {
+            let prefix = s[...us]
+            let digits = s[s.index(us, offsetBy: 2)...]
+            base = String(prefix) + String(digits)
+        }
+    }
+    return sanitizeFileName(m.folder) + "/" + base.uppercased()
+}
+
+/// 사진(묶음) 단위로 최근 것부터 size 장씩 나눈다. 한 사진에 딸린 파일은 같은 묶음에 들어간다.
+func makeBatches(_ media: [MediaInfo], size: Int) -> [[MediaInfo]] {
+    var groups: [String: [MediaInfo]] = [:]
+    var order: [String] = []
+    for m in media {
+        let k = assetGroupKey(m)
+        if groups[k] == nil { order.append(k) }
+        groups[k, default: []].append(m)
+    }
+    struct G { let files: [MediaInfo]; let date: Date?; let first: Int }
+    var list: [G] = []
+    for (i, k) in order.enumerated() {
+        let files = groups[k]!
+        let date = files.compactMap { $0.date }.max()
+        list.append(G(files: files, date: date, first: i))
+    }
+    let sorted = list.sorted { a, b in
+        switch (a.date, b.date) {
+        case let (p?, q?) where p != q: return p > q
+        case (nil, _?): return false
+        case (_?, nil): return true
+        default: return a.first < b.first
+        }
+    }
+    var batches: [[MediaInfo]] = []
+    var i = 0
+    let n = max(1, size)
+    while i < sorted.count {
+        let chunk = sorted[i..<min(i + n, sorted.count)]
+        batches.append(chunk.flatMap { $0.files })
+        i += n
+    }
+    return batches
+}
+
+/// 묶음 안 사진(묶음 키) 개수
+func photoCount(_ files: [MediaInfo]) -> Int {
+    return Set(files.map { assetGroupKey($0) }).count
 }
 
 // MARK: - 받은 목록 (저장폴더/.iphone-photo-dl/manifest.tsv)

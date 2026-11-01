@@ -141,6 +141,59 @@ func runSelfTest(_ console: Console) -> Bool {
     let pFolder = makePlan(media: media, options: opt, manifest: [:]) { _ in nil }
     check(pFolder.items.first?.relPath == "100APPLE/IMG_0001.HEIC" && pFolder.items[1].relPath == "110APPLE/IMG_0001.HEIC", "plan folder layout")
 
+    // 이미 맥에 있는 것(present) = 받은 목록 + 받은 것으로 친 것
+    check(p.present.count == 2, "plan present \(p.present.count)")
+
+    // 최근 것부터: 이름은 그대로, 순서만 바뀜 (날짜 없는 것은 맨 뒤)
+    opt = Options()
+    opt.newestFirst = true
+    let pNew = makePlan(media: media, options: opt, manifest: manifestEntries) { onDisk[$0] }
+    check(pNew.items.map { $0.relPath } == [
+        mar + "/IMG_0005 (2).HEIC",
+        feb + "/IMG_0002.MOV",
+        jan + "/IMG_0001 (2).HEIC",
+        jan + "/IMG_0001.HEIC",
+        "날짜 없음/IMG_0006.JPG",
+    ], "plan newest first \(pNew.items.map { $0.relPath })")
+    opt.limit = 1
+    let pNewLimit = makePlan(media: media, options: opt, manifest: [:]) { _ in nil }
+    check(pNewLimit.items.first?.media.name == "IMG_0005.HEIC" || pNewLimit.items.first?.media.name == "IMG_0004.HEIC"
+          || pNewLimit.items.first?.media.name == "IMG_0003.HEIC", "limit after newest-first")
+
+    // 한 사진에 딸린 파일 묶기
+    func mi(_ id: Int, _ name: String, _ d: Date?, folder: String = "100APPLE") -> MediaInfo {
+        return MediaInfo(id: id, name: name, folder: folder, size: 1, date: d)
+    }
+    check(assetGroupKey(mi(0, "IMG_1234.HEIC", nil)) == assetGroupKey(mi(1, "IMG_1234.MOV", nil)), "group live photo")
+    check(assetGroupKey(mi(0, "IMG_E1234.HEIC", nil)) == assetGroupKey(mi(1, "IMG_1234.HEIC", nil)), "group edited")
+    check(assetGroupKey(mi(0, "IMG_O1234.AAE", nil)) == assetGroupKey(mi(1, "IMG_1234.JPG", nil)), "group aae")
+    check(assetGroupKey(mi(0, "IMG_1234.HEIC", nil)) != assetGroupKey(mi(1, "IMG_1234.HEIC", nil, folder: "110APPLE")), "group by folder")
+    check(assetGroupKey(mi(0, "IMG_EXTRA.HEIC", nil)) != assetGroupKey(mi(1, "IMG_XTRA.HEIC", nil)), "group no false match")
+
+    // 묶음: 사진 단위로 최근 것부터 2장씩, Live Photo 는 한 장
+    let bm = [
+        mi(0, "IMG_0001.HEIC", day(2024, 1)),
+        mi(1, "IMG_0002.HEIC", day(2024, 2)),
+        mi(2, "IMG_0002.MOV", day(2024, 2)),
+        mi(3, "IMG_0003.HEIC", day(2024, 3)),
+        mi(4, "IMG_E0003.HEIC", day(2024, 4)),   // 편집본 날짜가 더 늦어도 원본과 같은 묶음
+        mi(5, "IMG_0004.JPG", nil),
+        mi(6, "IMG_0005.HEIC", day(2024, 5)),
+    ]
+    let batches = makeBatches(bm, size: 2)
+    check(batches.count == 3, "batches count \(batches.count)")
+    check(batches.count == 3 && Set(batches[0].map { $0.id }) == [6, 3, 4], "batch 1 newest \(batches.first?.map { $0.id } ?? [])")
+    check(batches.count == 3 && Set(batches[1].map { $0.id }) == [1, 2, 0], "batch 2 \(batches.count > 1 ? batches[1].map { $0.id } : [])")
+    check(batches.count == 3 && batches[2].map { $0.id } == [5], "batch 3 no date last")
+    check(photoCount(batches[0]) == 2 && photoCount(bm) == 5, "photo count")
+    check(makeBatches([], size: 300).isEmpty, "batches empty")
+    if let o = try? parseArguments(["--batch", "300"]) {
+        check(o.batchSize == 300 && o.newestFirst, "arg batch")
+    } else {
+        check(false, "arg batch parse")
+    }
+    check((try? parseArguments(["--batch", "0"])) == nil, "arg batch 0")
+
     // 받은 목록 저장·다시 읽기
     let fm = FileManager.default
     let tmp = fm.temporaryDirectory.appendingPathComponent("ipdl-selftest-\(getpid())", isDirectory: true)

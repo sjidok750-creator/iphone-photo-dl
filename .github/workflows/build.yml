@@ -96,7 +96,7 @@ jobs:
           grep -q "시작" "$HOME/Library/Logs/iphone-photo-dl.log"
           # 아이폰 없이 화면 모양만 보는 미리보기
           n=1
-          for s in downloading locked partial failed; do
+          for s in downloading locked partial failed batch confirm; do
             IPDL_UI_PREVIEW=$s "$APP/Contents/MacOS/iphone-photo-dl" &
             sleep 5
             screencapture -x "build/shots/$n-$s.png" || true

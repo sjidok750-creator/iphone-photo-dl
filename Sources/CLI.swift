@@ -19,6 +19,7 @@ final class CLIRunner {
     private let startedAt = Date()
     private var lastPlain = Date.distantPast
     private var exiting = false
+    private var promptedBatch = 0
 
     init(options: Options, console: Console) {
         opts = options
@@ -31,6 +32,8 @@ final class CLIRunner {
         cfg.window = options.window
         cfg.requestOriginals = options.requestOriginals
         cfg.planOnly = options.listOnly || options.dryRun
+        cfg.newestFirst = options.newestFirst
+        cfg.batchSize = options.batchSize
         engine = Engine(config: cfg)
         engine.onMessage = { [weak self] text in self?.console.line(text) }
         engine.onChange = { [weak self] in self?.update() }
@@ -82,6 +85,32 @@ final class CLIRunner {
             let lock = engine.isLocked ? " · 아이폰 잠금을 풀어 주세요" : ""
             show("받는 중 \(formatCount(engine.doneCount))/\(formatCount(engine.jobTotalCount)) (\(String(format: "%.1f", pct))%) · "
                  + "\(formatBytes(cur))/\(formatBytes(total)) · \(formatBytes(Int64(engine.speed)))/s · 남은 시간 \(formatDuration(engine.remainingSeconds))\(lock)")
+        case .confirmDelete:
+            guard let s = engine.batchSummary, promptedBatch != s.number else { break }
+            promptedBatch = s.number
+            console.clearStatus()
+            console.line()
+            console.line("── 묶음 \(s.number)/\(s.count) ── 맥에 저장된 것을 확인한 사진 \(formatCount(s.photos))장 (파일 \(formatCount(s.files))개, \(formatBytes(s.bytes)))")
+            if let a = s.oldest, let b = s.newest { console.line("   찍은 날짜: \(dayText(a)) ~ \(dayText(b))") }
+            if s.unverifiedPhotos > 0 { console.line("   맥에 저장이 확인되지 않은 \(s.unverifiedPhotos)장은 지우지 않습니다.") }
+            if engine.iCloudOn { console.line("   주의: iCloud 사진이 켜져 있어, 지우면 iCloud 와 다른 기기에서도 지워질 수 있습니다.") }
+            if let h = engine.deleteBlockedHint { console.line("   참고: \(h)") }
+            console.line("아이폰에서 이 사진들을 지울까요?  y = 지우기 · Enter = 지우지 않고 다음 · q = 그만")
+            FileHandle.standardOutput.write("> ".data(using: .utf8)!)
+            let answer = (readLine() ?? "q").trimmingCharacters(in: .whitespaces).lowercased()
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                switch answer {
+                case "y", "yes", "예", "ㅛ":
+                    self.engine.deleteCurrentBatch()
+                case "q", "quit", "그만", "ㅂ":
+                    self.engine.stopBatches()
+                default:
+                    self.engine.keepCurrentBatch()
+                }
+            }
+        case .deleting:
+            show("아이폰에서 지우는 중…")
         case .finished:
             console.line("저장 위치: \(engine.destination)")
             console.line("기록: \(Log.shared.url.path)")
@@ -111,6 +140,14 @@ final class CLIRunner {
         // 세션 닫기 요청이 나갈 짬을 준 뒤 끝낸다.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(code) }
     }
+}
+
+/// 2024-05-03 (금)
+func dayText(_ d: Date) -> String {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "ko_KR")
+    f.dateFormat = "yyyy-MM-dd (E)"
+    return f.string(from: d)
 }
 
 func openFolder(_ path: String) {
