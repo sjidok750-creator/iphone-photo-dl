@@ -366,7 +366,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
         switch e.stage {
         case .searching:
             h = "아이폰을 USB 케이블로 연결하세요"
-            d = "연결한 뒤 아이폰 잠금을 풀어 주세요. 처음 연결하면 아이폰에 '이 컴퓨터를 신뢰하겠습니까?'가 뜹니다 — '신뢰'를 누르세요.\n연결되면 저절로 받기 시작합니다."
+            d = "연결한 뒤 아이폰 잠금을 풀어 주세요. 처음 연결하면 아이폰에 '이 컴퓨터를 신뢰하겠습니까?'가 뜹니다 — '신뢰'를 누르세요.\nMac 에 USB 액세서리 연결을 허용할지 묻는 창이 뜨면 '허용'을 누르세요.\n연결되면 저절로 받기 시작합니다."
             if let last = e.lastResult { d = last + "\n\n" + d }
         case .connecting:
             h = "아이폰에 연결하는 중…"
