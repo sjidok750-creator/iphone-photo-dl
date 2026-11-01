@@ -29,7 +29,8 @@ jobs:
           sw_vers
           xcodebuild -version
           swiftc --version
-          xcodebuild -version | grep -q "^Xcode 16"
+          V=$(xcodebuild -version)
+          case "$V" in "Xcode 16"*) ;; *) echo "Xcode 16 이 아님"; exit 1 ;; esac
 
       - name: Shell syntax
         run: |
