@@ -3,7 +3,7 @@
 
 import Foundation
 
-let appVersion = "0.9.0"
+let appVersion = "0.9.1"
 let stateDirName = ".iphone-photo-dl"
 
 // MARK: - 옵션
@@ -27,6 +27,7 @@ struct Options {
     var listOnly = false
     var dryRun = false
     var openWhenDone = false
+    var requestOriginals = true
     var timeout: Double = 60
     var window = 4
     var showHelp = false
@@ -57,6 +58,7 @@ iphone-photo-dl \(appVersion) — 아이폰 사진·동영상을 Mac 으로 한�
   --photos-only       사진만 (Live Photo 의 동영상 부분 제외)
   --videos-only       동영상만
   --limit 20          앞에서부터 이 개수만 (시험용)
+  --no-originals      원본 요청을 하지 않고 아이폰 설정대로 받기
   --timeout 60        아이폰을 기다리는 시간(초)
   --open              끝나면 Finder 로 저장 폴더 열기
   --version           버전
@@ -92,6 +94,7 @@ func parseArguments(_ args: [String]) throws -> Options {
         case "--list": o.listOnly = true
         case "--dry-run": o.dryRun = true
         case "--open": o.openWhenDone = true
+        case "--no-originals": o.requestOriginals = false
         case "--photos-only": o.kinds = .photos
         case "--videos-only": o.kinds = .videos
         case "--layout":
@@ -150,6 +153,12 @@ struct MediaInfo {
 }
 
 let videoExtensions: Set<String> = ["mov", "mp4", "m4v", "3gp", "avi"]
+
+/// 기기 이름으로 아이폰·아이패드인지 본다(SD 카드 등 다른 카메라보다 먼저 고르려고).
+func looksLikeAppleDevice(_ name: String) -> Bool {
+    let n = name.lowercased()
+    return n.contains("iphone") || n.contains("ipad") || n.contains("ipod")
+}
 
 func isVideo(_ name: String) -> Bool {
     return videoExtensions.contains((name as NSString).pathExtension.lowercased())

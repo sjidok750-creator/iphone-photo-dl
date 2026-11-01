@@ -38,6 +38,7 @@ func runSelfTest(_ console: Console) -> Bool {
     check(numberedName("IMG_0001.HEIC", 2) == "IMG_0001 (2).HEIC", "numbered 2")
     check(numberedName("README", 3) == "README (3)", "numbered no ext")
     check(isVideo("IMG_1.MOV") && isVideo("a.mp4") && !isVideo("IMG_1.HEIC") && !isVideo("IMG_1.JPG"), "isVideo")
+    check(looksLikeAppleDevice("홍길동의 iPhone") && looksLikeAppleDevice("IPAD") && !looksLikeAppleDevice("NO NAME") && !looksLikeAppleDevice("Canon EOS"), "apple device name")
     check(sanitizeFileName("a/b:c") == "a_b_c", "sanitize")
     check(sanitizeFileName("  ") == "unnamed", "sanitize empty")
 
@@ -69,6 +70,8 @@ func runSelfTest(_ console: Console) -> Bool {
     check((try? parseArguments(["--since", "2024-13-01"])) == nil, "arg bad date")
     check((try? parseArguments(["--limit"])) == nil, "arg missing value")
     check((try? parseArguments([]))?.destination.hasSuffix("/Pictures/iPhone") == true, "arg default dest")
+    check((try? parseArguments([]))?.requestOriginals == true, "arg originals default")
+    check((try? parseArguments(["--no-originals"]))?.requestOriginals == false, "arg no-originals")
 
     // 계획: 날짜는 시간대와 상관없게 각 달 15일 정오(UTC)
     func day(_ y: Int, _ mo: Int, hour: Int = 12) -> Date {

@@ -29,6 +29,8 @@ final class Importer: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate,
 
     private let browser = ICDeviceBrowser()
     private var camera: ICCameraDevice?
+    private var fallbackCamera: ICCameraDevice?
+    private var fallbackTimer: Timer?
     private var phase = Phase.searching
 
     private var cameraFiles: [ICCameraFile] = []
@@ -101,18 +103,39 @@ final class Importer: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate,
 
     func deviceBrowser(_ browser: ICDeviceBrowser, didAdd device: ICDevice, moreComing: Bool) {
         guard camera == nil, phase == .searching, let cam = device as? ICCameraDevice else { return }
+        if looksLikeAppleDevice(cam.name ?? "") {
+            use(cam)
+        } else if fallbackCamera == nil {
+            // SD 카드 같은 다른 카메라는 잠시 기다려 아이폰이 없을 때만 쓴다.
+            fallbackCamera = cam
+            fallbackTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+                guard let self = self, self.camera == nil, let c = self.fallbackCamera else { return }
+                self.use(c)
+            }
+        }
+    }
+
+    private func use(_ cam: ICCameraDevice) {
         camera = cam
         searchTimer?.invalidate()
+        fallbackTimer?.invalidate()
         phase = .opening
         console.line("연결됨: \(cam.name ?? "이름 없는 기기")")
         cam.delegate = self
-        // 기기가 HEIC 를 JPEG 로 바꿔 보내지 않고 원본을 주도록 요청한다(지원하는 macOS 에서).
-        cam.mediaPresentation = .originalAssets
+        // 아이폰이 HEIC 를 JPEG 로 바꿔 보내지 않고 원본을 주도록 요청한다.
+        // 옛 macOS 에 없는 기능일 수 있어 있는지 먼저 확인한다.
+        if opts.requestOriginals && cam.responds(to: #selector(setter: ICCameraDevice.mediaPresentation)) {
+            cam.mediaPresentation = .originalAssets
+        }
         cam.requestOpenSession()
     }
 
     func deviceBrowser(_ browser: ICDeviceBrowser, didRemove device: ICDevice, moreGoing: Bool) {
         if let cam = camera, device === cam { deviceGone() }
+        if let f = fallbackCamera, device === f, camera == nil {
+            fallbackCamera = nil
+            fallbackTimer?.invalidate()
+        }
     }
 
     // MARK: - ICDeviceDelegate
@@ -132,7 +155,11 @@ final class Importer: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate,
         phase = .cataloging
         catalogStartedAt = Date()
         console.line("사진 목록을 읽는 중… (사진이 많으면 몇 분 걸립니다)")
-        if let cam = camera, cam.isAccessRestrictedAppleDevice { showRestrictedNotice() }
+        if let cam = camera,
+           cam.responds(to: #selector(getter: ICCameraDevice.isAccessRestrictedAppleDevice)),
+           cam.isAccessRestrictedAppleDevice {
+            showRestrictedNotice()
+        }
         startTicker()
     }
 
@@ -186,7 +213,7 @@ final class Importer: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate,
         }
         let took = Date().timeIntervalSince(catalogStartedAt)
         console.line("목록 읽기 끝: \(formatCount(files.count))개 (\(formatDuration(took)))")
-        if device.iCloudPhotosEnabled {
+        if device.responds(to: #selector(getter: ICCameraDevice.iCloudPhotosEnabled)), device.iCloudPhotosEnabled {
             console.line("""
             참고: 이 아이폰은 iCloud 사진을 씁니다. 설정 > 사진 에서 'iPhone 저장 공간 최적화'가 켜져 있으면
                   원본이 아이폰에 없는 사진은 목록에 없거나 받을 수 없습니다('다운로드 및 원본 유지'로 바꾸면 모두 받을 수 있음).
@@ -495,6 +522,7 @@ final class Importer: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate,
         guard phase != .finished else { return }
         phase = .finished
         searchTimer?.invalidate()
+        fallbackTimer?.invalidate()
         tickTimer?.invalidate()
         console.clearStatus()
         manifest?.close()
