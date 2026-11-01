@@ -9,7 +9,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-15-intel]
+        # macos-26 = macOS Tahoe (맥북 네오 등 최신 Mac 과 같은 macOS)
+        os: [macos-26, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
