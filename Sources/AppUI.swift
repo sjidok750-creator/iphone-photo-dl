@@ -39,6 +39,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// 화면에 그릴 값 (엔진에서 읽거나, 시험용 미리보기)
+struct ScreenState {
+    var stage = Stage.searching
+    var isLocked = false
+    var isBusy = false
+    var deviceName = ""
+    var destination = defaultDestination
+    var catalogPercent = 0
+    var catalogCount = 0
+    var doneCount = 0
+    var doneBytes: Int64 = 0
+    var jobTotalCount = 0
+    var jobTotalBytes: Int64 = 0
+    var currentBytes: Int64 = 0
+    var speed = 0.0
+    var remainingSeconds = Double.nan
+    var elapsed = 0.0
+    var failedCount = 0
+    var totalOnPhone = 0
+    var notices = Set<Notice>()
+    var closedAppNames: [String] = []
+    var lastResult: String?
+
+    init() {}
+
+    init(_ e: Engine) {
+        stage = e.stage
+        isLocked = e.isLocked
+        isBusy = e.isBusy
+        deviceName = e.deviceName
+        destination = e.destination
+        catalogPercent = e.catalogPercent
+        catalogCount = e.catalogCount
+        doneCount = e.doneCount
+        doneBytes = e.doneBytes
+        jobTotalCount = e.jobTotalCount
+        jobTotalBytes = e.jobTotalBytes
+        currentBytes = e.currentBytes
+        speed = e.speed
+        remainingSeconds = e.remainingSeconds
+        elapsed = e.elapsed
+        failedCount = e.failedCount
+        totalOnPhone = e.plan.totalCount
+        notices = e.notices
+        closedAppNames = e.closedAppNames
+        lastResult = e.lastResult
+    }
+
+    static func preview(_ name: String?) -> ScreenState? {
+        guard let name = name, !name.isEmpty else { return nil }
+        var s = ScreenState()
+        s.deviceName = "iPhone"
+        s.jobTotalCount = 2_345
+        s.jobTotalBytes = 15_300_000_000
+        switch name {
+        case "downloading":
+            s.stage = .downloading
+            s.isBusy = true
+            s.doneCount = 1_234
+            s.currentBytes = 8_000_000_000
+            s.speed = 28_100_000
+            s.remainingSeconds = 260
+            s.notices = [.converting, .closedApps]
+            s.closedAppNames = ["사진"]
+        case "locked":
+            s.stage = .downloading
+            s.isBusy = true
+            s.isLocked = true
+            s.doneCount = 300
+            s.currentBytes = 2_000_000_000
+        case "partial":
+            s.stage = .finished
+            s.doneCount = 2_340
+            s.doneBytes = 15_200_000_000
+            s.failedCount = 5
+            s.elapsed = 560
+            s.notices = [.stalled, .iCloudOn]
+        case "failed":
+            s.stage = .failed("아이폰과의 전송이 멈췄습니다.\n케이블을 뺐다 다시 꽂아 주세요. 받은 것은 건너뛰고 이어서 받습니다.")
+        default:
+            s.stage = .searching
+        }
+        return s
+    }
+}
+
 final class MainWindow: NSObject, NSWindowDelegate {
     let engine: Engine
     private let window: NSWindow
@@ -59,12 +145,14 @@ final class MainWindow: NSObject, NSWindowDelegate {
     private var quitConfirmed = false
     private var announcedFinish = false
     private var newerVersion: String?
+    /// 화면 모양 시험용(빌드 서버): IPDL_UI_PREVIEW=downloading|locked|partial|failed
+    private let previewState = ScreenState.preview(ProcessInfo.processInfo.environment["IPDL_UI_PREVIEW"])
 
     private static let folderKey = "destination"
 
     override init() {
         engine = Engine(config: EngineConfig(destination: MainWindow.initialDestination()))
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 360),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 300),
                           styleMask: [.titled, .closable, .miniaturizable],
                           backing: .buffered, defer: false)
         super.init()
@@ -72,10 +160,12 @@ final class MainWindow: NSObject, NSWindowDelegate {
         window.delegate = self
         window.isReleasedWhenClosed = false
         buildLayout()
-        engine.onChange = { [weak self] in self?.render() }
-        engine.start()
+        if previewState == nil {
+            engine.onChange = { [weak self] in self?.render() }
+            engine.start()
+            checkForUpdate()
+        }
         render()
-        checkForUpdate()
     }
 
     /// 전에 고른 폴더(앱 설정 → 0.9 의 터미널 실행기가 남긴 기록) → 기본 폴더
@@ -107,6 +197,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
         detail.textColor = .secondaryLabelColor
         detail.maximumNumberOfLines = 5
         detail.preferredMaxLayoutWidth = 532
+        detail.setContentCompressionResistancePriority(.required, for: .vertical)
         bar.style = .bar
         bar.isIndeterminate = false
         bar.minValue = 0
@@ -150,27 +241,39 @@ final class MainWindow: NSObject, NSWindowDelegate {
         let sep = NSBox()
         sep.boxType = .separator
 
-        let stack = NSStackView(views: [headline, detail, bar, stats, updateRow, sep, folderRow, buttonRow])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 20, right: 24)
-        stack.setCustomSpacing(8, after: headline)
-        stack.setCustomSpacing(16, after: updateRow)
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        // 위: 상태·설명·진행 / 아래: 저장 위치·단추 (창 아래에 붙임)
+        let top = NSStackView(views: [headline, detail, bar, stats, updateRow])
+        top.orientation = .vertical
+        top.alignment = .leading
+        top.spacing = 12
+        top.setCustomSpacing(8, after: headline)
+        top.translatesAutoresizingMaskIntoConstraints = false
+
+        let bottom = NSStackView(views: [sep, folderRow, buttonRow])
+        bottom.orientation = .vertical
+        bottom.alignment = .leading
+        bottom.spacing = 12
+        bottom.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
-        content.addSubview(stack)
+        content.addSubview(top)
+        content.addSubview(bottom)
         var constraints = [
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: content.topAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor),
+            top.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            top.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            top.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            bottom.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            bottom.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            bottom.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+            bottom.topAnchor.constraint(greaterThanOrEqualTo: top.bottomAnchor, constant: 20),
             content.widthAnchor.constraint(equalToConstant: 580),
-            content.heightAnchor.constraint(greaterThanOrEqualToConstant: 360),
+            content.heightAnchor.constraint(greaterThanOrEqualToConstant: 300),
         ]
-        for v in [headline, detail, bar, sep, folderRow, buttonRow] as [NSView] {
-            constraints.append(v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -48))
+        for v in [headline, detail, bar] as [NSView] {
+            constraints.append(v.widthAnchor.constraint(equalTo: top.widthAnchor))
+        }
+        for v in [sep, folderRow, buttonRow] as [NSView] {
+            constraints.append(v.widthAnchor.constraint(equalTo: bottom.widthAnchor))
         }
         NSLayoutConstraint.activate(constraints)
         window.contentView = content
@@ -179,7 +282,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
     // MARK: - 그리기
 
     private func render() {
-        let e = engine
+        let e = previewState ?? ScreenState(engine)
         folderField.stringValue = (e.destination as NSString).abbreviatingWithTildeInPath
         window.title = e.deviceName.isEmpty ? appDisplayName : "\(appDisplayName) — \(e.deviceName)"
         headline.textColor = .labelColor
@@ -224,7 +327,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
         case .finished:
             if e.jobTotalCount == 0 {
                 h = "새 사진이 없습니다"
-                d = "아이폰의 사진·동영상 \(formatCount(e.plan.totalCount))개를 이미 모두 받았습니다."
+                d = "아이폰의 사진·동영상 \(formatCount(e.totalOnPhone))개를 이미 모두 받았습니다."
             } else if e.failedCount == 0 {
                 h = "완료! \(formatCount(e.doneCount))개를 받았습니다"
                 d = "\(formatBytes(e.doneBytes)) · 걸린 시간 \(formatDuration(e.elapsed)). 다음부터는 새로 찍은 것만 받습니다."
@@ -274,7 +377,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    private func tips(_ e: Engine) -> [String] {
+    private func tips(_ e: ScreenState) -> [String] {
         var t: [String] = []
         if e.notices.contains(.converting) || e.notices.contains(.manyErrors) {
             t.append("느리거나 실패하면: 아이폰 설정 > 사진 > 'Mac 또는 PC로 전송'을 '원본 유지'로 바꾸세요.")

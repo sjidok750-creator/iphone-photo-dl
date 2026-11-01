@@ -83,16 +83,28 @@ jobs:
           test "$code" -eq 3
           test ! -e "$RUNNER_TEMP/out"   # --list 는 아무것도 만들지 않는다
 
-      - name: App window test (screenshot)
+      - name: App window test (screenshots)
         run: |
+          mkdir -p build/shots
           open "$APP"
           sleep 8
           pgrep -fl "MacOS/iphone-photo-dl" || { echo "앱이 떠 있지 않음"; exit 1; }
-          screencapture -x build/app-window.png || echo "화면 캡처 실패"
+          screencapture -x build/shots/0-real.png || echo "화면 캡처 실패"
           pkill -f "MacOS/iphone-photo-dl" || true
           echo "--- 기록"
           tail -n 20 "$HOME/Library/Logs/iphone-photo-dl.log"
           grep -q "시작" "$HOME/Library/Logs/iphone-photo-dl.log"
+          # 아이폰 없이 화면 모양만 보는 미리보기
+          n=1
+          for s in downloading locked partial failed; do
+            IPDL_UI_PREVIEW=$s "$APP/Contents/MacOS/iphone-photo-dl" &
+            sleep 5
+            screencapture -x "build/shots/$n-$s.png" || true
+            pkill -f "MacOS/iphone-photo-dl" || true
+            sleep 1
+            n=$((n + 1))
+          done
+          ls -la build/shots
 
       - name: Package
         run: |
@@ -115,7 +127,7 @@ jobs:
             build/iPhonePhotoDL-app.zip
             build/iphone-photo-dl-macos.tar.gz
             build/SHA256.txt
-            build/app-window.png
+            build/shots/
             build/icon.png
 
       - name: Release
