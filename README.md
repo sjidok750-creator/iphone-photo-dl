@@ -105,6 +105,7 @@ rm -f /usr/local/bin/iphone-photo-dl
 ## 만든 방식 (개발자용)
 
 - Swift 명령줄 도구, ImageCaptureCore 만 사용 (`Sources/`). 최소 macOS 10.15 (x86_64), 11 (arm64).
+- 릴리스 빌드는 Xcode 16 으로 한다 — macOS 10.15 를 공식 지원하는 마지막 Xcode 다 (Xcode 26 은 11 이상, 27 은 12 이상).
 - `bash build.sh` — 이 Mac 용 빌드 (Xcode 명령줄 도구 필요), `bash build.sh universal` — 겸용.
 - `iphone-photo-dl --self-test` — 기기 없이 로직 검사.
 - 태그 `v*` 를 올리면 GitHub Actions 가 빌드·검사 후 릴리스에 `iphone-photo-dl-macos.tar.gz` 를 올리고, `install.sh` 는 최신 릴리스를 받습니다.

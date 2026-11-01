@@ -12,15 +12,24 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # macOS 10.15 를 공식 지원하는 마지막 Xcode 가 16 이다(Xcode 26 은 11 이상, 27 은 12 이상).
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: |
+          ls -d /Applications/Xcode*.app
+          X=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -n 1)
+          if [ -z "$X" ]; then echo "Xcode 16 이 없음"; exit 1; fi
+          sudo xcode-select -s "$X/Contents/Developer"
 
       - name: Toolchain
         run: |
           sw_vers
           xcodebuild -version
           swiftc --version
+          xcodebuild -version | grep -q "^Xcode 16"
 
       - name: Shell syntax
         run: |
