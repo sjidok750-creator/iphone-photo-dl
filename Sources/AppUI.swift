@@ -352,6 +352,9 @@ final class MainWindow: NSObject, NSWindowDelegate {
             h = "아이폰 잠금을 풀어 주세요"
             headline.textColor = .systemOrange
             d = "잠금을 풀면 저절로 이어서 진행합니다. 처음 연결이면 아이폰에서 '이 컴퓨터를 신뢰'를 누르세요."
+            if e.stage == .downloading {
+                st = "\(formatBytes(e.currentBytes)) / \(formatBytes(e.jobTotalBytes))"
+            }
         }
 
         headline.stringValue = h
