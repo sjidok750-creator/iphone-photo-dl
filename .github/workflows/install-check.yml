@@ -1,0 +1,32 @@
+name: install-check
+
+# 공개 주소의 설치 한 줄(README 그대로)이 깨끗한 Mac 에서 되는지 손으로 돌려 보는 검사.
+on:
+  workflow_dispatch:
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Install with the README one-liner
+        run: |
+          uname -m
+          sw_vers -productVersion
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+      - name: Run installed binary
+        run: |
+          B="$HOME/.iphone-photo-dl/bin/iphone-photo-dl"
+          file "$B"
+          "$B" --version
+          "$B" --self-test
+          set +e
+          "$B" --list --timeout 3
+          code=$?
+          set -e
+          echo "exit code: $code"
+          test "$code" -eq 3
