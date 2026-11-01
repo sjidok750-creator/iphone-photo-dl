@@ -549,8 +549,9 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         manifest = man
         var opts = Options()
         opts.layout = config.layout
-        opts.kinds = config.kinds
-        opts.since = config.since
+        // 묶음(지우기) 모드에서는 거르지 않는다: 사진의 일부만 받고 지우면 안 받은 파일까지 지워질 수 있다.
+        opts.kinds = batchMode ? .all : config.kinds
+        opts.since = batchMode ? nil : config.since
         opts.limit = batchMode ? nil : config.limit
         opts.newestFirst = config.newestFirst || batchMode
         let root = destRoot

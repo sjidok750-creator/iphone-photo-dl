@@ -153,6 +153,10 @@ func parseArguments(_ args: [String]) throws -> Options {
     if positional.count > 1 {
         throw ArgError(description: "저장폴더는 하나만 줄 수 있습니다: \(positional.joined(separator: ", "))")
     }
+    if o.batchSize != nil && (o.since != nil || o.kinds != .all || o.limit != nil) {
+        // 사진의 일부(예: Live Photo 의 사진만)를 받고 그 사진을 지우면 안 받은 동영상까지 지워질 수 있다.
+        throw ArgError(description: "--batch 는 --since·--photos-only·--videos-only·--limit 와 같이 쓸 수 없습니다 (일부만 받고 지우는 것을 막으려고)")
+    }
     if let p = positional.first {
         o.destination = NSString(string: p).expandingTildeInPath
     }

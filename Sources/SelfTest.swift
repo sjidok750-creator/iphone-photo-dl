@@ -193,6 +193,8 @@ func runSelfTest(_ console: Console) -> Bool {
         check(false, "arg batch parse")
     }
     check((try? parseArguments(["--batch", "0"])) == nil, "arg batch 0")
+    check((try? parseArguments(["--batch", "300", "--photos-only"])) == nil, "arg batch + photos-only 막음")
+    check((try? parseArguments(["--batch", "300", "--since", "2024-01-01"])) == nil, "arg batch + since 막음")
 
     // 받은 목록 저장·다시 읽기
     let fm = FileManager.default
