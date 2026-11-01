@@ -734,7 +734,7 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         pending.insert(contentsOf: requeue, at: pendingPos)
 
         if consecutiveStalls >= 3 {
-            fail("아이폰과의 전송이 멈췄습니다.\n케이블을 뺐다 다시 꽂아 주세요. 받은 것은 건너뛰고 이어서 받습니다.", kind: .connection)
+            fail("아이폰과의 전송이 멈췄습니다.\n아이폰이 잠겨 있으면 잠금을 풀고(자동 잠금 '안 함' 권장), 그래도 안 되면 케이블을 뺐다 다시 꽂아 주세요. 받은 것은 건너뛰고 이어서 받습니다.", kind: .connection)
             return
         }
         message("전송이 \(seconds)초 동안 멈춰서 다시 시도합니다.")

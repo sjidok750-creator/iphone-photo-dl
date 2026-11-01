@@ -32,3 +32,15 @@ jobs:
           set -e
           echo "exit code: $code"
           test "$code" -eq 3
+      - name: Open installed app window
+        run: |
+          open "/Applications/아이폰 사진 받기.app"
+          sleep 8
+          pgrep -fl "MacOS/iphone-photo-dl" || { echo "앱 창이 떠 있지 않음"; exit 1; }
+          screencapture -x "window-${{ matrix.os }}.png" || true
+          pkill -f "MacOS/iphone-photo-dl" || true
+          tail -n 5 "$HOME/Library/Logs/iphone-photo-dl.log"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: window-${{ matrix.os }}
+          path: window-${{ matrix.os }}.png

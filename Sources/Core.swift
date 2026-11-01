@@ -3,7 +3,7 @@
 
 import Foundation
 
-let appVersion = "0.10.0"
+let appVersion = "0.10.1"
 let appDisplayName = "아이폰 사진 받기"
 let githubRepo = "sjidok750-creator/iphone-photo-dl"
 let installCommand = "curl -fsSL https://raw.githubusercontent.com/\(githubRepo)/main/install.sh | bash"
