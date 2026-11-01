@@ -39,6 +39,8 @@ struct BatchSummary {
     let newest: Date?
     let oldest: Date?
     let unverifiedPhotos: Int  // 맥에 저장이 확인되지 않아 지우지 않을 사진 수
+    let convertedPhotos: Int   // 그중 변환본(원본 아님)만 있어 지우지 않는 사진 수
+    let firstTrial: Bool       // 처음 지우기라 작게 시험하는 묶음
     let deletable: [MediaInfo]
 }
 
@@ -155,6 +157,7 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
     private var samples: [(t: Date, bytes: Int64)] = []
     private var lastMilestone = 0
     private var deleteStartedAt = Date()
+    private var firstTrial = false
 
     private let interferingApps: Set<String> = ["com.apple.Photos", "com.apple.Image_Capture"]
 
@@ -270,7 +273,8 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
                 }
             }
         }, completion: { [weak self] results, error in
-            DispatchQueue.main.async {
+            // 아이폰이 보내는 '지워짐' 알림(didRemove)이 조금 늦게 올 수 있어 1초 기다렸다 함께 센다.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self?.deleteFinished(results: results, error: error, summary: s, byObject: byObject)
             }
         })
@@ -653,7 +657,9 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         guard prepareFolders() else { return }
         let size = config.batchSize ?? 300
         let candidates = plan.items.map { $0.media } + plan.present.map { $0.media }
-        batches = makeBatches(candidates, size: size)
+        // 이 폴더에서 아직 한 번도 지운 적이 없으면 첫 묶음은 20장만: 지우기가 처음 도는 것을 작게 시험한다.
+        firstTrial = !fm.fileExists(atPath: deletedListURL.path)
+        batches = makeBatches(candidates, size: size, firstSize: firstTrial ? min(20, size) : nil)
         batchIndex = 0
         if !resumeJob {
             sessionDoneCount = 0
@@ -702,39 +708,44 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
         for m in batch { groups[assetGroupKey(m), default: []].append(m) }
         var deletable: [MediaInfo] = []
         var unverified = 0
+        var converted = 0
         var bytes: Int64 = 0
         for (key, files) in groups {
-            if files.allSatisfy({ verifiedOnDisk($0) }) {
+            let checks = files.map { copyCheck($0) }
+            if checks.allSatisfy({ $0 == .original }) {
                 deletable += files
                 bytes += files.reduce(Int64(0)) { $0 + $1.size }
             } else {
                 unverified += 1
-                log("맥에 저장 확인 안 됨 → 지우지 않음: \(key)")
+                if checks.contains(.converted) { converted += 1 }
+                log("원본 그대로 저장된 것이 확인 안 됨 → 지우지 않음: \(key) \(zip(files, checks).map { "\($0.0.name)=\($0.1)" }.joined(separator: " "))")
             }
         }
         let dates = deletable.compactMap { $0.date }
         batchSummary = BatchSummary(number: batchIndex + 1, count: batches.count,
                                     photos: groups.count - unverified, files: deletable.count, bytes: bytes,
                                     newest: dates.max(), oldest: dates.min(),
-                                    unverifiedPhotos: unverified, deletable: deletable)
+                                    unverifiedPhotos: unverified, convertedPhotos: converted,
+                                    firstTrial: firstTrial && batchIndex == 0, deletable: deletable)
         endActivity()
         stage = .confirmDelete
         var text = "묶음 \(batchIndex + 1)/\(batches.count): 사진 \(formatCount(groups.count - unverified))장(파일 \(formatCount(deletable.count))개, \(formatBytes(bytes)))이 맥에 저장된 것을 확인했습니다."
         if unverified > 0 { text += " 확인되지 않은 \(unverified)장은 지우지 않습니다." }
+        if converted > 0 { text += " (그중 \(converted)장은 원본이 아닌 변환본만 있음 — 아이폰 설정 > 사진 > 'Mac 또는 PC로 전송'을 '원본 유지'로 바꾸세요)" }
         message(text)
         changed()
     }
 
-    /// 받은 목록에 있고, 그 파일이 실제로 있고, 크기가 맞는가
-    private func verifiedOnDisk(_ m: MediaInfo) -> Bool {
-        guard let rel = manifest?.entries[manifestKey(m)] else { return false }
-        let path = destRoot.appendingPathComponent(rel).path
-        guard let a = try? fm.attributesOfItem(atPath: path),
-              (a[.type] as? FileAttributeType) == .typeRegular,
-              let size = (a[.size] as? NSNumber)?.int64Value, size > 0 else { return false }
-        if size == m.size { return true }
-        // 아이폰이 변환해서 보낸 파일(확장자가 바뀜)은 크기가 원래와 다르다
-        return (rel as NSString).pathExtension.lowercased() != (m.name as NSString).pathExtension.lowercased()
+    /// 맥의 사본이 아이폰 원본과 같은가: 받은 목록에 있고, 파일이 있고, 확장자와 바이트 수가 같아야 .original
+    private func copyCheck(_ m: MediaInfo) -> CopyCheck {
+        let rel = manifest?.entries[manifestKey(m)]
+        var size: Int64?
+        if let r = rel,
+           let a = try? fm.attributesOfItem(atPath: destRoot.appendingPathComponent(r).path),
+           (a[.type] as? FileAttributeType) == .typeRegular {
+            size = (a[.size] as? NSNumber)?.int64Value
+        }
+        return checkCopy(catalogName: m.name, catalogSize: m.size, savedRelPath: rel, savedSize: size)
     }
 
     private func deleteFinished(results: [ICDeleteResult: [ICCameraItem]], error: Error?,
@@ -743,8 +754,19 @@ final class Engine: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, I
             log("늦은 지우기 결과(무시): 성공 \(results[.successful]?.count ?? 0)")
             return
         }
-        let ok = results[.successful] ?? []
-        let bad = (results[.failed] ?? []).count + (results[.canceled] ?? []).count
+        var ok = results[.successful] ?? []
+        var okIds = Set(ok.map { ObjectIdentifier($0) })
+        // 결과표에 없더라도 아이폰이 '지워짐'을 알려 온 것은 지운 것으로 센다.
+        for m in s.deletable where m.id < cameraFiles.count {
+            let f = cameraFiles[m.id]
+            let oid = ObjectIdentifier(f)
+            if removedItems.contains(oid) && !okIds.contains(oid) {
+                ok.append(f)
+                okIds.insert(oid)
+            }
+        }
+        let bad = max(0, s.files - ok.count)
+        log("지우기 결과: 결과표 성공 \(results[.successful]?.count ?? 0) · 실패 \(results[.failed]?.count ?? 0) · 취소 \(results[.canceled]?.count ?? 0) · 알림 포함 성공 \(ok.count)")
         if let e = error { log("지우기 오류: \(describeError(e))") }
 
         let stamp = ISO8601DateFormatter().string(from: Date())

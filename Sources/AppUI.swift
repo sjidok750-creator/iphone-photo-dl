@@ -165,7 +165,8 @@ struct ScreenState {
             c.month = 10; c.day = 31
             let newest = Calendar.current.date(from: c)
             s.summary = BatchSummary(number: 2, count: 15, photos: 298, files: 412, bytes: 2_100_000_000,
-                                     newest: newest, oldest: oldest, unverifiedPhotos: 2, deletable: [])
+                                     newest: newest, oldest: oldest, unverifiedPhotos: 2, convertedPhotos: 2,
+                                     firstTrial: false, deletable: [])
         default:
             s.stage = .searching
         }
@@ -404,7 +405,14 @@ final class MainWindow: NSObject, NSWindowDelegate {
             lines.append(info)
             lines.append("맥에 저장된 것을 하나하나 확인했습니다. '폴더 열기'로 먼저 보셔도 됩니다.")
             if let u = s?.unverifiedPhotos, u > 0 {
-                lines.append("맥에 저장이 확인되지 않은 \(u)장은 지우지 않습니다.")
+                var t = "원본 그대로 저장된 것이 확인되지 않은 \(u)장은 지우지 않습니다."
+                if let c = s?.convertedPhotos, c > 0 {
+                    t += " (\(c)장은 변환본만 있음 → 아이폰 '원본 유지'로 바꾸고 다시 받으면 지울 수 있음)"
+                }
+                lines.append(t)
+            }
+            if s?.firstTrial == true {
+                lines.append("처음이라 20장만 먼저 지웁니다. 지운 뒤 아이폰 사진 앱의 '최근 삭제된 항목'과 맥의 사진을 확인해 보세요. 다음 묶음부터 \(MainWindow.batchSize)장씩입니다.")
             }
             if e.iCloudOn {
                 lines.append("주의: iCloud 사진이 켜져 있어, 지우면 iCloud 와 다른 기기에서도 지워질 수 있습니다.")

@@ -363,8 +363,27 @@ func assetGroupKey(_ m: MediaInfo) -> String {
     return sanitizeFileName(m.folder) + "/" + base.uppercased()
 }
 
+enum CopyCheck: Equatable {
+    case original      // 원본 그대로: 이름(확장자)과 바이트 수가 아이폰 목록과 같다 → 지워도 됨
+    case missing       // 맥에 파일이 없음
+    case empty         // 0 바이트
+    case converted     // 아이폰이 변환해서 보낸 사본(HEIC → JPG 등) → 원본이 아니므로 지우지 않음
+    case sizeMismatch  // 확장자는 같은데 크기가 다름 → 지우지 않음
+}
+
+/// 맥에 있는 사본이 아이폰 원본과 같은가 (지워도 되는 유일한 경우 = .original)
+func checkCopy(catalogName: String, catalogSize: Int64, savedRelPath: String?, savedSize: Int64?) -> CopyCheck {
+    guard let rel = savedRelPath, let size = savedSize else { return .missing }
+    if size <= 0 { return .empty }
+    let savedExt = (rel as NSString).pathExtension.lowercased()
+    let origExt = (catalogName as NSString).pathExtension.lowercased()
+    if savedExt != origExt { return .converted }
+    return size == catalogSize ? .original : .sizeMismatch
+}
+
 /// 사진(묶음) 단위로 최근 것부터 size 장씩 나눈다. 한 사진에 딸린 파일은 같은 묶음에 들어간다.
-func makeBatches(_ media: [MediaInfo], size: Int) -> [[MediaInfo]] {
+/// firstSize 를 주면 첫 묶음만 그 장수로 (처음 지울 때 작게 시험하려고).
+func makeBatches(_ media: [MediaInfo], size: Int, firstSize: Int? = nil) -> [[MediaInfo]] {
     var groups: [String: [MediaInfo]] = [:]
     var order: [String] = []
     for m in media {
@@ -389,8 +408,8 @@ func makeBatches(_ media: [MediaInfo], size: Int) -> [[MediaInfo]] {
     }
     var batches: [[MediaInfo]] = []
     var i = 0
-    let n = max(1, size)
     while i < sorted.count {
+        let n = max(1, batches.isEmpty ? (firstSize ?? size) : size)
         let chunk = sorted[i..<min(i + n, sorted.count)]
         batches.append(chunk.flatMap { $0.files })
         i += n

@@ -187,6 +187,19 @@ func runSelfTest(_ console: Console) -> Bool {
     check(batches.count == 3 && batches[2].map { $0.id } == [5], "batch 3 no date last")
     check(photoCount(batches[0]) == 2 && photoCount(bm) == 5, "photo count")
     check(makeBatches([], size: 300).isEmpty, "batches empty")
+    let firstSmall = makeBatches(bm, size: 3, firstSize: 1)
+    check(firstSmall.count == 3 && photoCount(firstSmall[0]) == 1 && photoCount(firstSmall[1]) == 3 && photoCount(firstSmall[2]) == 1,
+          "first batch small \(firstSmall.map { photoCount($0) })")
+
+    // 지워도 되는 사본인가 (안전에 가장 중요한 규칙)
+    check(checkCopy(catalogName: "IMG_1.HEIC", catalogSize: 1000, savedRelPath: "2024/2024-05/IMG_1.HEIC", savedSize: 1000) == .original, "copy original")
+    check(checkCopy(catalogName: "IMG_1.HEIC", catalogSize: 1000, savedRelPath: "2024/2024-05/IMG_1 (2).heic", savedSize: 1000) == .original, "copy original renamed/lowercase")
+    check(checkCopy(catalogName: "IMG_1.HEIC", catalogSize: 1000, savedRelPath: "2024/2024-05/IMG_1.JPG", savedSize: 700) == .converted, "copy converted → 지우지 않음")
+    check(checkCopy(catalogName: "IMG_1.HEIC", catalogSize: 1000, savedRelPath: "2024/2024-05/IMG_1.JPG", savedSize: 1000) == .converted, "copy converted same size → 지우지 않음")
+    check(checkCopy(catalogName: "IMG_1.HEIC", catalogSize: 1000, savedRelPath: "2024/2024-05/IMG_1.HEIC", savedSize: 999) == .sizeMismatch, "copy size mismatch")
+    check(checkCopy(catalogName: "IMG_1.HEIC", catalogSize: 1000, savedRelPath: nil, savedSize: nil) == .missing, "copy missing")
+    check(checkCopy(catalogName: "IMG_1.HEIC", catalogSize: 1000, savedRelPath: "a/IMG_1.HEIC", savedSize: nil) == .missing, "copy file gone")
+    check(checkCopy(catalogName: "IMG_1.HEIC", catalogSize: 0, savedRelPath: "a/IMG_1.HEIC", savedSize: 0) == .empty, "copy empty")
     if let o = try? parseArguments(["--batch", "300"]) {
         check(o.batchSize == 300 && o.newestFirst, "arg batch")
     } else {

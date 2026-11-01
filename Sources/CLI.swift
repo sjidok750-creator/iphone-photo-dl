@@ -92,7 +92,9 @@ final class CLIRunner {
             console.line()
             console.line("── 묶음 \(s.number)/\(s.count) ── 맥에 저장된 것을 확인한 사진 \(formatCount(s.photos))장 (파일 \(formatCount(s.files))개, \(formatBytes(s.bytes)))")
             if let a = s.oldest, let b = s.newest { console.line("   찍은 날짜: \(dayText(a)) ~ \(dayText(b))") }
-            if s.unverifiedPhotos > 0 { console.line("   맥에 저장이 확인되지 않은 \(s.unverifiedPhotos)장은 지우지 않습니다.") }
+            if s.unverifiedPhotos > 0 { console.line("   원본 그대로 저장된 것이 확인되지 않은 \(s.unverifiedPhotos)장은 지우지 않습니다.") }
+            if s.convertedPhotos > 0 { console.line("   그중 \(s.convertedPhotos)장은 변환본만 있습니다 → 아이폰 설정 > 사진 > 'Mac 또는 PC로 전송'을 '원본 유지'로.") }
+            if s.firstTrial { console.line("   처음이라 \(s.photos)장만 먼저 지웁니다. 지운 뒤 아이폰 '최근 삭제된 항목'과 맥의 사진을 확인해 보세요.") }
             if engine.iCloudOn { console.line("   주의: iCloud 사진이 켜져 있어, 지우면 iCloud 와 다른 기기에서도 지워질 수 있습니다.") }
             if let h = engine.deleteBlockedHint { console.line("   참고: \(h)") }
             console.line("아이폰에서 이 사진들을 지울까요?  y = 지우기 · Enter = 지우지 않고 다음 · q = 그만")
